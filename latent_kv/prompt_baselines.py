@@ -233,6 +233,18 @@ def _write_prompt_records(run_dir: Path, baseline: str, rows: list[TrajectoryRec
     return path
 
 
+def _prepare_prompt_records(run_dir: Path, baseline: str) -> Path:
+    path = run_dir / "behavior" / f"{baseline}_records.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def _append_prompt_record(path: Path, row: TrajectoryRecord) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(to_json_line(row))
+
+
 def _merge_metrics(run_dir: Path, baseline: str, rows: list[dict[str, Any]], extra: dict[str, Any]) -> dict[str, Any]:
     existing = load_metric_payload(run_dir)
     by_key = {
@@ -287,97 +299,135 @@ def run_prompt_baseline(
         baseline_tier=baseline_tier,
     )
     records: list[TrajectoryRecord] = []
+    record_path = _prepare_prompt_records(run_dir, baseline)
+    extra = {
+        f"prompt_{baseline}_records": str(record_path),
+        f"prompt_{baseline}_local_model": model_id,
+        f"prompt_{baseline}_benchmark": benchmark,
+        f"prompt_{baseline}_baseline_tier": baseline_tier,
+        f"prompt_{baseline}_protocol": protocol_metadata,
+        f"prompt_{baseline}_protocol_match": False,
+    }
+    payload = _merge_metrics(run_dir, baseline, [], extra)
 
     for idx, example in enumerate(examples):
+        start = time.perf_counter()
+        error = None
         if baseline == "self_consistency":
-            prompt = format_prompt(example, "cot")
-            sample_outputs: list[tuple[str | None, str]] = []
-            vote_counts: Counter[str] = Counter()
-            total_latency = 0.0
-            total_tokens = 0
-            for sample_idx in range(samples):
-                text, latency, tokens = generate_local(
-                    model,
-                    tokenizer,
-                    prompt,
-                    device,
-                    max_new_tokens=max_new_tokens,
-                    seed=seed + idx * 1000 + sample_idx,
-                    do_sample=True,
-                    temperature=temperature,
-                )
-                parsed, _ = verify_output(text, example)
-                sample_outputs.append((parsed, text))
-                vote_counts[str(parsed) if parsed is not None else "<unparsed>"] += 1
-                total_latency += latency
-                total_tokens += tokens
-            parsed, output_text = _majority_answer(sample_outputs)
-            correct = parsed is not None and parsed == verify_output(example.answer, example)[0]
-            latency_s = total_latency
-            generated_tokens = total_tokens
-            prompt_used = prompt
-            sample_metadata = {
-                "self_consistency_votes": dict(sorted(vote_counts.items())),
-                "self_consistency_unparsed": vote_counts.get("<unparsed>", 0),
-            }
+            prompt_used = format_prompt(example, "cot")
         else:
             prompt_used = format_prompt(example, baseline)
-            output_text, latency_s, generated_tokens = generate_local(
-                model,
-                tokenizer,
-                prompt_used,
-                device,
-                max_new_tokens=max_new_tokens,
-                seed=seed + idx,
-                do_sample=False,
-            )
-            parsed, correct = verify_output(output_text, example)
-            sample_metadata = {}
-
-        records.append(
-            TrajectoryRecord(
-                run_id=run_dir.name,
-                benchmark=example.benchmark,
-                task_id=example.task_id,
-                model_id=model_id,
-                seed=seed,
-                attempt_id=idx,
-                prompt=prompt_used,
-                target=example.answer,
-                output_text=output_text,
-                parsed_answer=parsed,
-                correct=bool(correct),
-                retry_index=0,
-                latency_s=latency_s,
-                generated_tokens=generated_tokens,
-                prompt_tokens=len(prompt_used.split()),
-                metadata=example.metadata
-                | {
-                    "prompt_baseline": baseline,
-                    "prompt_protocol": protocol_metadata["protocol_name"],
-                    "prompt_family": protocol_metadata["prompt_family"],
-                    "decoding_protocol": protocol_metadata["decoding_protocol"],
-                    "local_files_only": True,
-                    "samples": samples if baseline == "self_consistency" else 1,
-                    "temperature": temperature if baseline == "self_consistency" else None,
-                    "chat_template": uses_chat_template,
-                    "protocol_match": False,
+        try:
+            if baseline == "self_consistency":
+                sample_outputs: list[tuple[str | None, str]] = []
+                vote_counts: Counter[str] = Counter()
+                total_latency = 0.0
+                total_tokens = 0
+                for sample_idx in range(samples):
+                    text, latency, tokens = generate_local(
+                        model,
+                        tokenizer,
+                        prompt_used,
+                        device,
+                        max_new_tokens=max_new_tokens,
+                        seed=seed + idx * 1000 + sample_idx,
+                        do_sample=True,
+                        temperature=temperature,
+                    )
+                    parsed, _ = verify_output(text, example)
+                    sample_outputs.append((parsed, text))
+                    vote_counts[str(parsed) if parsed is not None else "<unparsed>"] += 1
+                    total_latency += latency
+                    total_tokens += tokens
+                parsed, output_text = _majority_answer(sample_outputs)
+                correct = parsed is not None and parsed == verify_output(example.answer, example)[0]
+                latency_s = total_latency
+                generated_tokens = total_tokens
+                sample_metadata = {
+                    "self_consistency_votes": dict(sorted(vote_counts.items())),
+                    "self_consistency_unparsed": vote_counts.get("<unparsed>", 0),
                 }
-                | sample_metadata,
-            )
+            else:
+                output_text, latency_s, generated_tokens = generate_local(
+                    model,
+                    tokenizer,
+                    prompt_used,
+                    device,
+                    max_new_tokens=max_new_tokens,
+                    seed=seed + idx,
+                    do_sample=False,
+                )
+                parsed, correct = verify_output(output_text, example)
+                sample_metadata = {}
+        except Exception as exc:
+            output_text = ""
+            parsed = None
+            correct = False
+            latency_s = time.perf_counter() - start
+            generated_tokens = 0
+            sample_metadata = {}
+            error = f"{type(exc).__name__}: {exc}"
+
+        record = TrajectoryRecord(
+            run_id=run_dir.name,
+            benchmark=example.benchmark,
+            task_id=example.task_id,
+            model_id=model_id,
+            seed=seed,
+            attempt_id=idx,
+            prompt=prompt_used,
+            target=example.answer,
+            output_text=output_text,
+            parsed_answer=parsed,
+            correct=bool(correct) and error is None,
+            retry_index=0,
+            latency_s=latency_s,
+            generated_tokens=generated_tokens,
+            prompt_tokens=len(prompt_used.split()),
+            metadata=example.metadata
+            | {
+                "prompt_baseline": baseline,
+                "prompt_protocol": protocol_metadata["protocol_name"],
+                "prompt_family": protocol_metadata["prompt_family"],
+                "decoding_protocol": protocol_metadata["decoding_protocol"],
+                "local_files_only": True,
+                "samples": samples if baseline == "self_consistency" else 1,
+                "temperature": temperature if baseline == "self_consistency" else None,
+                "chat_template": uses_chat_template,
+                "protocol_match": False,
+                "generation_error": error,
+            }
+            | sample_metadata,
+        )
+        records.append(record)
+        _append_prompt_record(record_path, record)
+        payload = _merge_metrics(
+            run_dir,
+            baseline,
+            [record.__dict__ for record in records],
+            extra
+            | {
+                f"prompt_{baseline}_completed_examples": len(records),
+                f"prompt_{baseline}_failed_examples": sum(
+                    1 for row in records if row.metadata.get("generation_error")
+                ),
+            },
+        )
+        print(
+            f"[{idx + 1}/{len(examples)}] {baseline} {example.task_id}: "
+            f"correct={record.correct} error={error is not None}",
+            flush=True,
         )
 
-    record_path = _write_prompt_records(run_dir, baseline, records)
     return _merge_metrics(
         run_dir,
         baseline,
         [record.__dict__ for record in records],
-        {
-            f"prompt_{baseline}_records": str(record_path),
-            f"prompt_{baseline}_local_model": model_id,
-            f"prompt_{baseline}_benchmark": benchmark,
-            f"prompt_{baseline}_baseline_tier": baseline_tier,
-            f"prompt_{baseline}_protocol": protocol_metadata,
-            f"prompt_{baseline}_protocol_match": False,
+        extra
+        | {
+            f"prompt_{baseline}_completed_examples": len(records),
+            f"prompt_{baseline}_failed_examples": sum(
+                1 for row in records if row.metadata.get("generation_error")
+            )
         },
     )

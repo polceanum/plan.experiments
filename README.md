@@ -104,6 +104,10 @@ use the same command path and write comparable protocol metadata:
 | `full` | 1319 | 320 | Full GSM8K-test-sized run once protocols are frozen |
 
 Explicit `--limit` and `--max-new-tokens` values override the selected tier.
+Prompt-baseline records are written incrementally, and `metrics.json` plus
+`report.md` are refreshed after each completed example. If a long run fails or
+is interrupted, inspect the partial `behavior/*_records.jsonl`, `metrics.json`,
+and shell log for the last completed task and any recorded generation errors.
 
 Example quick check:
 
