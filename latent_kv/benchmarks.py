@@ -285,11 +285,20 @@ def load_gsm8k(limit: int, seed: int = 0) -> list[TaskExample]:
 
 def load_humaneval(limit: int, seed: int = 0) -> list[TaskExample]:
     del seed
+    if os.environ.get("LATENT_KV_ENABLE_HUMANEVAL") != "1":
+        raise RuntimeError(
+            "HumanEval is disabled by default. Set LATENT_KV_ENABLE_HUMANEVAL=1 "
+            "and keep datasets cached locally before running it."
+        )
     try:
-        from datasets import load_dataset
+        from datasets import DownloadConfig, load_dataset
     except ImportError as exc:
         raise RuntimeError("datasets is required for HumanEval") from exc
-    dataset = load_dataset("openai_humaneval", split="test")
+    dataset = load_dataset(
+        "openai_humaneval",
+        split="test",
+        download_config=DownloadConfig(local_files_only=True),
+    )
     examples = []
     for idx, row in enumerate(dataset.select(range(min(limit, len(dataset))))):
         examples.append(

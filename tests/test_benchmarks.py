@@ -1,7 +1,10 @@
+import pytest
+
 from latent_kv.benchmarks import (
     extract_last_number,
     load_examples,
     load_game24,
+    load_humaneval,
     load_hanoi,
     load_sudoku,
     verify_game24,
@@ -47,3 +50,9 @@ def test_game24_verifier_accepts_adapter_answer():
 def test_all_loader_uses_fixed_local_tasks_without_humaneval():
     examples = load_examples("all", limit=1, seed=0)
     assert {example.benchmark for example in examples} >= {"hanoi", "sudoku", "game24"}
+
+
+def test_humaneval_requires_explicit_enable_flag(monkeypatch):
+    monkeypatch.delenv("LATENT_KV_ENABLE_HUMANEVAL", raising=False)
+    with pytest.raises(RuntimeError, match="HumanEval is disabled"):
+        load_humaneval(1)

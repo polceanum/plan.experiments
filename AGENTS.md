@@ -31,6 +31,8 @@ future agents should preserve.
 - GSM8K uses a built-in fallback slice unless
   `LATENT_KV_ALLOW_DATASET_DOWNLOAD=1` is set. When using the cached real GSM8K
   split, keep `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
+- HumanEval is disabled unless `LATENT_KV_ENABLE_HUMANEVAL=1` is set, and it
+  must load from local cached dataset files only.
 - Distinguish local implementation checks from exact reported-protocol
   reproduction.
   Current local models are much smaller than the PaLM/GPT-4-scale systems used

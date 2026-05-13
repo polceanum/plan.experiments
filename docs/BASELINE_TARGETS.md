@@ -19,6 +19,8 @@ count match the reported protocol.
 - No API keys or hosted model services are allowed.
 - If required weights are not present locally, the command should fail rather
   than download silently.
+- HumanEval-style code benchmarks must be explicitly enabled and loaded from
+  local cached data; execution of generated code should remain gated.
 - Reports should distinguish:
   - `local_check`: baseline implementation ran locally.
   - `protocol_match`: model/prompt/decoding/split match the reported protocol.

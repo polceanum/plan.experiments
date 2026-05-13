@@ -26,12 +26,13 @@ API or service.
 Dataset loading is also conservative by default for smoke runs. GSM8K uses a
 small built-in fallback slice unless `LATENT_KV_ALLOW_DATASET_DOWNLOAD=1` is set
 in the environment.
+HumanEval is disabled unless `LATENT_KV_ENABLE_HUMANEVAL=1` is set, and even
+then it is loaded from the local dataset cache only.
 
 ## First Smoke Run
 
 The model-facing commands are intentionally deterministic and small by default.
-They expect HuggingFace model weights to be available locally or downloadable in
-your environment.
+They expect HuggingFace model weights to already be available locally.
 
 ```bash
 conda run -n orpheus python -m latent_kv collect --benchmark hanoi --limit 3 --run-id smoke_hanoi
