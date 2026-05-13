@@ -124,3 +124,48 @@ short and concrete so they can be updated after every run.
   correction/verification positions.
 - Add candidate generation plus automatic filtering for generated latent KV
   states.
+
+## 2026-05-13 - Qwen baseline protocol audit smoke
+
+### Worked
+
+- Ran local Qwen2.5-0.5B-Instruct GSM8K baseline smoke with standard, CoT, and retry/reflection on 2 cached real test examples.
+- Protocol metadata was written for each prompt baseline and check-targets reported dimension-level protocol mismatches.
+
+### Did Not Work / Caveats
+
+- This is a tiny local smoke check, not a reported PaLM 540B CoT reproduction; model and prompt protocol intentionally mismatch the reported target.
+
+### Left To Do
+
+- Scale the protocol-audited Qwen GSM8K run to a fixed 20-example tier before using it as a stronger local baseline.
+
+## 2026-05-13 - Qwen 5-example baseline sanity check
+
+### Worked
+
+- Ran protocol-audited Qwen2.5-0.5B-Instruct GSM8K local baseline check on 5 cached real test examples with 320 max new tokens.
+- The earlier 2-example 0.5 tie disappeared: standard reached 2/5, retry_reflection reached 2/5, and CoT reached 1/5 with different task-level success patterns.
+
+### Did Not Work / Caveats
+
+- Still a small local check, not a reported PaLM 540B protocol reproduction; check-targets marks CoT as protocol_mismatch for model and prompt.
+
+### Left To Do
+
+- Use a fixed 20-example GSM8K tier next for a stronger local baseline before comparing latent-KV methods.
+
+## 2026-05-13 - Prompt baseline tier smoke validation
+
+### Worked
+
+- Validated the new prompt-baseline --baseline-tier smoke path on local Qwen2.5-0.5B-Instruct with cached real GSM8K examples.
+- The smoke run wrote baseline_tier metadata into metrics/report artifacts and check-targets produced the expected protocol_mismatch audit.
+
+### Did Not Work / Caveats
+
+- This remains a 5-example local smoke tier, not a strong comparison floor or reported-protocol reproduction.
+
+### Left To Do
+
+- Commit the tier/protocol changes, then use --baseline-tier working or comparison for stronger local baseline runs.

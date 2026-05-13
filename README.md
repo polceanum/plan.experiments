@@ -90,3 +90,41 @@ conda run -n orpheus python -m latent_kv targets
 The target registry distinguishes local implementation checks from exact
 reported-protocol reproductions. Matching reported numbers requires the source
 model scale, prompt, decoding settings, and benchmark protocol.
+
+## Prompt Baseline Tiers
+
+Prompt baselines support named budget tiers so a quick check and a larger run
+use the same command path and write comparable protocol metadata:
+
+| Tier | Limit | Max New Tokens | Purpose |
+|---|---:|---:|---|
+| `smoke` | 5 | 320 | Quick model-level check for plumbing and reports |
+| `working` | 20 | 320 | Small local baseline tier before early comparisons |
+| `comparison` | 100 | 320 | Stronger local comparison floor for candidate methods |
+| `full` | 1319 | 320 | Full GSM8K-test-sized run once protocols are frozen |
+
+Explicit `--limit` and `--max-new-tokens` values override the selected tier.
+
+Example quick check:
+
+```bash
+LATENT_KV_ALLOW_DATASET_DOWNLOAD=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false \
+conda run -n orpheus python -m latent_kv prompt-baseline \
+  --run runs/baseline_qwen_smoke \
+  --benchmark gsm8k \
+  --baseline-tier smoke \
+  --baseline standard cot retry_reflection \
+  --model-id /path/to/local/model/snapshot
+```
+
+Example full-sized run using the same protocol path:
+
+```bash
+LATENT_KV_ALLOW_DATASET_DOWNLOAD=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false \
+conda run -n orpheus python -m latent_kv prompt-baseline \
+  --run runs/baseline_qwen_full \
+  --benchmark gsm8k \
+  --baseline-tier full \
+  --baseline standard cot retry_reflection \
+  --model-id /path/to/local/model/snapshot
+```

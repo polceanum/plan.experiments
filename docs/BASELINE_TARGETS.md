@@ -25,3 +25,16 @@ count match the reported protocol.
   - `local_check`: baseline implementation ran locally.
   - `protocol_match`: model/prompt/decoding/split match the reported protocol.
   - `target_match`: metric is within the accepted tolerance of the reported target.
+
+## Protocol Auditing
+
+Tracked reported targets include explicit protocol dimensions: model, prompt
+family, decoding/search policy, benchmark split, and sample count when known.
+Local baseline runs should write the corresponding observed metadata into
+`metrics.json` so `check-targets` can report which dimensions match and which
+ones make a run a local check rather than a reproduction.
+
+For prompt baselines, the current local protocols are named zero-shot or local
+approximation protocols. They are useful strong baselines, but they should not
+be marked as reported-protocol reproductions unless the exact reported prompt
+pack, model scale, decoding settings, split, and sample budget are all matched.

@@ -14,3 +14,14 @@ def test_targets_cli_outputs_reported_targets(capsys):
     assert "self_consistency" in out
     assert "reported_value" in out
 
+
+def test_prompt_baseline_help_lists_tiers(capsys):
+    try:
+        main(["prompt-baseline", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--baseline-tier" in out
+    assert "smoke" in out
+    assert "full" in out
+

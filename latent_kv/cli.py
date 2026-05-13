@@ -16,7 +16,7 @@ from .cache import choose_device, collect_one, load_model_and_tokenizer, set_see
 from .compressors import run_compression
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .metrics import evaluate_run
-from .prompt_baselines import run_prompt_baseline
+from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .research_log import append_research_log
 from .schemas import TrajectoryRecord, append_jsonl, read_json, read_jsonl, write_json
@@ -231,6 +231,11 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
     baselines = args.baseline
     if baselines == ["all"]:
         baselines = ["standard", "cot", "self_consistency", "retry_reflection"]
+    tier_name, limit, max_new_tokens = resolve_baseline_tier(
+        args.baseline_tier,
+        limit=args.limit,
+        max_new_tokens=args.max_new_tokens,
+    )
     payload = None
     for baseline in baselines:
         payload = run_prompt_baseline(
@@ -238,12 +243,13 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
             benchmark=args.benchmark,
             baseline=baseline,
             model_id=args.model_id,
-            limit=args.limit,
+            limit=limit,
             seed=args.seed,
-            max_new_tokens=args.max_new_tokens,
+            max_new_tokens=max_new_tokens,
             device_name=args.device,
             samples=args.samples,
             temperature=args.temperature,
+            baseline_tier=tier_name,
         )
         print(f"Scored local prompt baseline: {baseline}")
     _write_basic_plots(run_dir)
@@ -394,9 +400,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prompt.add_argument("--model-id", default=SMOKE_MODEL)
     prompt.add_argument("--device", default="auto")
-    prompt.add_argument("--limit", type=int, default=3)
+    prompt.add_argument(
+        "--baseline-tier",
+        default="custom",
+        choices=sorted(BASELINE_TIERS),
+        help="Named baseline budget preset. Explicit --limit or --max-new-tokens override the preset values.",
+    )
+    prompt.add_argument("--limit", type=int, default=None)
     prompt.add_argument("--seed", type=int, default=0)
-    prompt.add_argument("--max-new-tokens", type=int, default=96)
+    prompt.add_argument("--max-new-tokens", type=int, default=None)
     prompt.add_argument("--samples", type=int, default=5)
     prompt.add_argument("--temperature", type=float, default=0.7)
     prompt.set_defaults(func=cmd_prompt_baseline)
