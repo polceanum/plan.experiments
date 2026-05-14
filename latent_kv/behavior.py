@@ -16,6 +16,7 @@ from .cache import (
     load_model_and_tokenizer,
     unflatten_cache,
 )
+from .codec_validation import validate_cache_against_bundle
 from .injection import greedy_continue_from_loaded_bundle
 from .metrics import aggregate_records, load_metric_payload, metric_to_dict, render_report
 from .schemas import TaskExample, TrajectoryRecord, read_jsonl, to_json_line, write_json
@@ -124,9 +125,16 @@ def run_cache_behavioral_baseline(
             cache_override, mse = _load_reconstructed_cache(run_dir, baseline, cache_path)
             if mse is not None:
                 reconstruction_mses.append(mse)
+        validation_error = None
+        if cache_override is not None:
+            validation = validate_cache_against_bundle(cache_override, bundle)
+            if not validation.valid:
+                validation_error = ";".join(validation.errors)
 
         start = time.perf_counter()
         try:
+            if validation_error is not None:
+                raise ValueError(f"Decoded cache validation failed: {validation_error}")
             output = greedy_continue_from_loaded_bundle(
                 bundle=bundle,
                 model=model,
@@ -166,6 +174,7 @@ def run_cache_behavioral_baseline(
                 | {
                     "behavioral_baseline": baseline,
                     "replay_error": error,
+                    "codec_validation_error": validation_error,
                     "local_files_only": True,
                 },
             )

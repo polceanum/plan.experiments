@@ -37,3 +37,13 @@ def test_collect_prompt_caches_help_lists_config(capsys):
     assert "--layer-mode" in out
     assert "--resume" in out
 
+
+def test_validate_codec_help_lists_method(capsys):
+    try:
+        main(["validate-codec", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--method" in out
+    assert "retrieval" in out
+

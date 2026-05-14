@@ -199,6 +199,13 @@ def run_compression(
             "shapes": cache_matrix.shapes,
             "method": method,
             "latent_dim": latent_dim,
+            "codec_contract": {
+                "point_codec": True,
+                "geometry_only": False,
+                "input_representation": "flattened_full_cache",
+                "one_latent_per_cache": True,
+                "decodes_to": "flattened_cache_vector",
+            },
         },
         latent_path,
     )
@@ -211,7 +218,7 @@ def run_compression(
         reconstruction_mse=mse,
         latent_path=str(latent_path),
         artifact_path=str(artifact_path),
-        metrics={"input_dim": float(x.shape[1])},
+        metrics={"input_dim": float(x.shape[1]), "point_codec": 1.0},
     )
     write_json(artifact_dir / f"{method}_result.json", result.__dict__)
     return result

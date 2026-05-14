@@ -13,6 +13,7 @@ from .behavior import run_cache_behavioral_baseline
 from .benchmarks import load_examples, verify_output
 from .brief import get_brief
 from .cache import choose_device, collect_one, load_model_and_tokenizer, set_seed
+from .codec_validation import validate_reconstructed_artifact
 from .compressors import run_compression
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
@@ -338,6 +339,14 @@ def cmd_check_targets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate_codec(args: argparse.Namespace) -> int:
+    import json
+
+    validation = validate_reconstructed_artifact(Path(args.run), args.method)
+    print(json.dumps(validation.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_inject(args: argparse.Namespace) -> int:
     bundle_path = Path(args.cache)
     summary = validate_bundle_for_injection(bundle_path)
@@ -423,6 +432,14 @@ def build_parser() -> argparse.ArgumentParser:
     behavior.add_argument("--device", default="auto")
     behavior.add_argument("--max-new-tokens", type=int, default=32)
     behavior.set_defaults(func=cmd_behavior)
+
+    validate_codec = sub.add_parser(
+        "validate-codec",
+        help="Validate that compression latents decode to replay-compatible cache shapes",
+    )
+    validate_codec.add_argument("--run", required=True)
+    validate_codec.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "retrieval"])
+    validate_codec.set_defaults(func=cmd_validate_codec)
 
     prompt = sub.add_parser("prompt-baseline", help="Run local prompt baselines without remote APIs")
     prompt.add_argument("--run", required=True)

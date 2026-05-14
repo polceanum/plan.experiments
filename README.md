@@ -152,3 +152,19 @@ The resolved config records model-derived cache dimensions such as layer count,
 KV heads, head dimension, selected layers, bytes per token, and storage estimate.
 These values are derived from the local model config rather than hardcoded, so
 larger local models can be added through additional config files.
+
+Compression artifacts can be checked against the point-codec contract before
+behavioural replay. The validator confirms there is one latent point per cache,
+decodes reconstructed cache vectors back to the original KV shapes, checks for
+finite tensors, and verifies replay metadata is present.
+
+```bash
+conda run -n orpheus python -m latent_kv compress \
+  --run runs/qwen_cache_smoke \
+  --method retrieval \
+  --latent-dim 8
+
+conda run -n orpheus python -m latent_kv validate-codec \
+  --run runs/qwen_cache_smoke \
+  --method retrieval
+```
