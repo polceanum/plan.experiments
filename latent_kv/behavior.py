@@ -88,7 +88,7 @@ def _load_reconstructed_cache(
 def run_cache_behavioral_baseline(
     run_dir: Path,
     baseline: str,
-    max_new_tokens: int = 32,
+    max_new_tokens: int | None = None,
     device_name: str = "auto",
     model_id: str | None = None,
 ) -> dict[str, Any]:
@@ -117,6 +117,7 @@ def run_cache_behavioral_baseline(
     model, tokenizer = load_model_and_tokenizer(chosen_model, device, local_files_only=True)
     out_rows: list[TrajectoryRecord] = []
     reconstruction_mses: list[float] = []
+    replay_token_budgets: list[int] = []
 
     for idx, record in enumerate(records):
         cache_path = str(record["cache_path"])
@@ -133,6 +134,8 @@ def run_cache_behavioral_baseline(
                 validation_error = ";".join(validation.errors)
 
         start = time.perf_counter()
+        replay_max_new_tokens = int(max_new_tokens or record.get("generated_tokens") or 32)
+        replay_token_budgets.append(replay_max_new_tokens)
         try:
             if validation_error is not None:
                 raise ValueError(f"Decoded cache validation failed: {validation_error}")
@@ -141,7 +144,7 @@ def run_cache_behavioral_baseline(
                 model=model,
                 tokenizer=tokenizer,
                 device=device,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=replay_max_new_tokens,
                 cache_override=cache_override,
             )
             error = None
@@ -175,6 +178,8 @@ def run_cache_behavioral_baseline(
                 | {
                     "behavioral_baseline": baseline,
                     "replay_error": error,
+                    "replay_max_new_tokens": replay_max_new_tokens,
+                    "source_generated_tokens": record.get("generated_tokens"),
                     "codec_validation_error": validation_error,
                     "local_files_only": True,
                 },
@@ -187,7 +192,10 @@ def run_cache_behavioral_baseline(
         f"behavior_{baseline}_records": str(record_path),
         f"behavior_{baseline}_local_model": chosen_model,
         f"behavior_{baseline}_max_new_tokens": max_new_tokens,
+        f"behavior_{baseline}_replay_budget_source": "cli" if max_new_tokens is not None else "record_generated_tokens",
     }
+    if replay_token_budgets:
+        extra[f"behavior_{baseline}_mean_replay_max_new_tokens"] = sum(replay_token_budgets) / len(replay_token_budgets)
     if reconstruction_mses:
         extra[f"behavior_{baseline}_mean_reconstruction_mse"] = sum(reconstruction_mses) / len(reconstruction_mses)
     return _merge_metrics(run_dir, baseline, row_dicts, extra)

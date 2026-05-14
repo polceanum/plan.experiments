@@ -174,7 +174,7 @@ def prompt_protocol_metadata(
 
 
 @torch.no_grad()
-def generate_local(
+def generate_local_with_ids(
     model: Any,
     tokenizer: Any,
     prompt: str,
@@ -183,7 +183,7 @@ def generate_local(
     seed: int,
     do_sample: bool = False,
     temperature: float = 0.7,
-) -> tuple[str, float, int]:
+) -> tuple[str, float, int, torch.Tensor]:
     set_seed(seed)
     if getattr(tokenizer, "chat_template", None):
         encoded_ids = tokenizer.apply_chat_template(
@@ -209,7 +209,31 @@ def generate_local(
     generated = model.generate(**generate_kwargs)
     latency = time.perf_counter() - start
     new_tokens = int(generated.shape[-1] - encoded["input_ids"].shape[-1])
-    text = tokenizer.decode(generated[0][encoded["input_ids"].shape[-1] :], skip_special_tokens=True)
+    new_token_ids = generated[:, encoded["input_ids"].shape[-1] :].detach().cpu()
+    text = tokenizer.decode(new_token_ids[0], skip_special_tokens=True)
+    return text, latency, new_tokens, new_token_ids
+
+
+def generate_local(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    device: torch.device,
+    max_new_tokens: int,
+    seed: int,
+    do_sample: bool = False,
+    temperature: float = 0.7,
+) -> tuple[str, float, int]:
+    text, latency, new_tokens, _ = generate_local_with_ids(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        seed=seed,
+        do_sample=do_sample,
+        temperature=temperature,
+    )
     return text, latency, new_tokens
 
 

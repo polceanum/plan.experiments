@@ -15,7 +15,7 @@ from .cache import (
 )
 from .experiment_config import ResolvedExperimentConfig, write_resolved_config
 from .metrics import evaluate_run, load_metric_payload, render_report
-from .prompt_baselines import format_prompt, generate_local, prompt_protocol_metadata
+from .prompt_baselines import format_prompt, generate_local_with_ids, prompt_protocol_metadata
 from .schemas import CacheMetadata, TrajectoryRecord, append_jsonl, read_jsonl, write_json
 
 
@@ -78,7 +78,7 @@ def run_prompt_cache_collection(
         start = time.perf_counter()
         error = None
         try:
-            output_text, latency_s, generated_tokens = generate_local(
+            output_text, latency_s, generated_tokens, generation_token_ids = generate_local_with_ids(
                 model,
                 tokenizer,
                 prompt_used,
@@ -118,6 +118,7 @@ def run_prompt_cache_collection(
             input_ids = None
             attention_mask = None
             last_logits = None
+            generation_token_ids = None
             error = f"{type(exc).__name__}: {exc}"
 
         cache_path = None
@@ -150,6 +151,13 @@ def run_prompt_cache_collection(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 last_logits=last_logits,
+                generation_token_ids=generation_token_ids,
+                generation_config={
+                    "max_new_tokens": max_new_tokens,
+                    "do_sample": False,
+                    "decoding_protocol": protocol_metadata["decoding_protocol"],
+                    "seed": seed + idx,
+                },
             )
 
         record = TrajectoryRecord(

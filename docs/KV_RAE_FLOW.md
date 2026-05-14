@@ -219,6 +219,20 @@ Keeping those separate is important. The RAE learns a bottlenecked cache-state
 representation. Behavioural usefulness is measured only after local LLM replay
 and task verification.
 
+## Variable Source Lengths
+
+Plan/cache sequences should keep their original lengths. Different prompts and
+different reasoning continuations naturally produce different token counts, and
+those lengths are part of the behavioural trace. For batching, the codec pads
+flattened cache vectors to a common width before chunking, but it also stores the
+original vector lengths and cache shapes. The scientific object remains one
+latent point per original variable-length sequence.
+
+Replay should likewise use the source record's original generation budget unless
+an experiment explicitly overrides it. Cache bundles for new prompt-cache
+collections store generated token IDs and generation config so replay fidelity
+can be checked against the original local generation path.
+
 ## Current Qwen Smoke Dimensions
 
 For the local Qwen2.5-0.5B-Instruct smoke runs, one 128-token prompt cache over

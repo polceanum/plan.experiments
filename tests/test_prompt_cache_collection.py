@@ -24,8 +24,8 @@ def test_prompt_cache_collection_writes_records_and_bundles(tmp_path: Path, monk
     def fake_load_model_and_tokenizer(model_id, device, local_files_only=True):
         return object(), FakeTokenizer()
 
-    def fake_generate_local(model, tokenizer, prompt, device, max_new_tokens, seed, **kwargs):
-        return load_hanoi(2)[seed].answer, 0.01, 3
+    def fake_generate_local_with_ids(model, tokenizer, prompt, device, max_new_tokens, seed, **kwargs):
+        return load_hanoi(2)[seed].answer, 0.01, 3, torch.tensor([[4, 5, 6]])
 
     def fake_capture_prompt_cache(**kwargs):
         return (
@@ -40,7 +40,7 @@ def test_prompt_cache_collection_writes_records_and_bundles(tmp_path: Path, monk
 
     monkeypatch.setattr(prompt_cache_collection, "load_model_and_tokenizer", fake_load_model_and_tokenizer)
     monkeypatch.setattr(prompt_cache_collection, "choose_device", lambda device_name: "cpu")
-    monkeypatch.setattr(prompt_cache_collection, "generate_local", fake_generate_local)
+    monkeypatch.setattr(prompt_cache_collection, "generate_local_with_ids", fake_generate_local_with_ids)
     monkeypatch.setattr(prompt_cache_collection, "capture_prompt_cache", fake_capture_prompt_cache)
 
     payload = run_prompt_cache_collection(
@@ -66,5 +66,8 @@ def test_prompt_cache_collection_writes_records_and_bundles(tmp_path: Path, monk
     assert bundle["metadata"]["prompt_protocol"] == "zero_shot_standard"
     assert bundle["metadata"]["correct"] is True
     assert bundle["input_ids"].shape == (1, 3)
+    assert bundle["generation_token_ids"].tolist() == [[4, 5, 6]]
+    assert bundle["generation_config"]["max_new_tokens"] == 16
+    assert bundle["generation_config"]["decoding_protocol"] == "greedy"
     assert payload["extra"]["prompt_cache_standard_local_model"] == "fake-model"
     assert metrics["baselines"][0]["baseline"] == "prompt_cache_standard"

@@ -99,6 +99,8 @@ def save_cache_bundle(
     input_ids: torch.Tensor | None = None,
     attention_mask: torch.Tensor | None = None,
     last_logits: torch.Tensor | None = None,
+    generation_token_ids: torch.Tensor | None = None,
+    generation_config: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -110,6 +112,8 @@ def save_cache_bundle(
             "input_ids": input_ids.detach().cpu() if input_ids is not None else None,
             "attention_mask": attention_mask.detach().cpu() if attention_mask is not None else None,
             "last_logits": last_logits.detach().cpu() if last_logits is not None else None,
+            "generation_token_ids": generation_token_ids.detach().cpu() if generation_token_ids is not None else None,
+            "generation_config": generation_config or {},
         },
         path,
     )

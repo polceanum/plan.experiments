@@ -2,12 +2,40 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from .cache import CacheTuple, cache_to_device, load_cache_bundle, load_model_and_tokenizer
+
+
+def _forward_parameters(model: Any) -> set[str]:
+    try:
+        return set(inspect.signature(model.forward).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def _eos_ids(tokenizer: Any) -> set[int]:
+    eos = getattr(tokenizer, "eos_token_id", None)
+    if eos is None:
+        return set()
+    if isinstance(eos, (list, tuple, set)):
+        return {int(token_id) for token_id in eos}
+    return {int(eos)}
+
+
+def _apply_repetition_penalty(logits: torch.Tensor, token_ids: torch.Tensor, penalty: float) -> torch.Tensor:
+    if penalty == 1.0:
+        return logits
+    adjusted = logits.clone()
+    for batch_idx in range(adjusted.shape[0]):
+        for token_id in torch.unique(token_ids[batch_idx]).tolist():
+            score = adjusted[batch_idx, int(token_id)]
+            adjusted[batch_idx, int(token_id)] = score * penalty if score < 0 else score / penalty
+    return adjusted
 
 
 @torch.no_grad()
@@ -36,24 +64,36 @@ def greedy_continue_from_loaded_bundle(
         else torch.ones((1, prompt_len), dtype=torch.long, device=device)
     )
     next_logits = logits.to(device)
+    forward_parameters = _forward_parameters(model)
+    eos_ids = _eos_ids(tokenizer)
+    repetition_penalty = float(getattr(getattr(model, "generation_config", None), "repetition_penalty", 1.0) or 1.0)
+    token_history = input_ids.to(device)
 
     for _ in range(max_new_tokens):
-        next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+        scored_logits = _apply_repetition_penalty(next_logits, token_history, repetition_penalty)
+        next_token = torch.argmax(scored_logits, dim=-1, keepdim=True)
         generated.append(int(next_token.item()))
+        token_history = torch.cat([token_history, next_token], dim=-1)
         current_mask = torch.cat(
             [current_mask, torch.ones((1, 1), dtype=current_mask.dtype, device=device)],
             dim=-1,
         )
-        outputs = model(
-            input_ids=next_token,
-            attention_mask=current_mask,
-            past_key_values=past,
-            use_cache=True,
-            return_dict=True,
-        )
+        model_kwargs = {
+            "input_ids": next_token,
+            "attention_mask": current_mask,
+            "past_key_values": past,
+            "use_cache": True,
+            "return_dict": True,
+        }
+        replay_position = torch.tensor([[prompt_len + len(generated) - 1]], dtype=torch.long, device=device)
+        if "position_ids" in forward_parameters:
+            model_kwargs["position_ids"] = replay_position
+        if "cache_position" in forward_parameters:
+            model_kwargs["cache_position"] = replay_position.reshape(-1)
+        outputs = model(**model_kwargs)
         past = outputs.past_key_values
         next_logits = outputs.logits[:, -1, :]
-        if tokenizer.eos_token_id is not None and generated[-1] == tokenizer.eos_token_id:
+        if generated[-1] in eos_ids:
             break
     return tokenizer.decode(generated, skip_special_tokens=True)
 

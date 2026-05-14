@@ -427,7 +427,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--model-id", default=None)
     evaluate.add_argument("--device", default="auto")
-    evaluate.add_argument("--max-new-tokens", type=int, default=32)
+    evaluate.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Replay token budget. Defaults to each record's original generated_tokens when omitted.",
+    )
     evaluate.set_defaults(func=cmd_evaluate)
 
     behavior = sub.add_parser("behavior", help="Run local behavioural replay baselines from saved caches")
@@ -440,7 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     behavior.add_argument("--model-id", default=None)
     behavior.add_argument("--device", default="auto")
-    behavior.add_argument("--max-new-tokens", type=int, default=32)
+    behavior.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Replay token budget. Defaults to each record's original generated_tokens when omitted.",
+    )
     behavior.set_defaults(func=cmd_behavior)
 
     validate_codec = sub.add_parser(

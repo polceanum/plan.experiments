@@ -219,3 +219,23 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Improve behavioural replay protocol for prompt-cache continuations; add labelled latent diagnostics separating solved vs unsolved source caches; scale cache collection beyond 10 examples after replay checks are better understood.
+
+## 2026-05-14 - Prompt-cache replay protocol fix
+
+### Worked
+
+- Added generation-token metadata to new cache bundles, including generated token IDs and the local generation config used for the source sequence.
+- Changed behavioural replay to use each source record's original generated-token count by default, preserving variable plan lengths while still allowing explicit CLI overrides.
+- Matched local greedy replay to the model generation stack by passing explicit replay positions where supported and applying the model's repetition penalty before argmax.
+- A fresh one-example Qwen cache replay now reproduces the stored correct source answer with the record-derived 295-token budget.
+- Re-running the 10-cache smoke with record-derived budgets gave original_cache 2/10, matching the source prompt-cache accuracy; retrieval and rae_lstm remained 0/10 with no replay errors.
+
+### Did Not Work / Caveats
+
+- Decoded-cache behavioural replay still fails on the 10-cache smoke even though structural validation passes, so the current RAE/retrieval cache reconstructions are not behaviourally faithful yet.
+- The replay path still uses legacy tuple caches, which Transformers warns will be removed in a future version.
+
+### Left To Do
+
+- Add token-level replay fidelity diagnostics comparing original generated IDs against replay IDs.
+- Improve decoded-cache quality before scaling behavioural claims; keep retrieval as the nearest-neighbour sanity baseline.
