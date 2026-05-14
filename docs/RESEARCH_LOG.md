@@ -169,3 +169,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Commit the tier/protocol changes, then use --baseline-tier working or comparison for stronger local baseline runs.
+
+## 2026-05-14 - Qwen full-tier baseline interrupted after standard
+
+### Worked
+
+- Completed the full 1319-example cached GSM8K standard prompt baseline for local Qwen2.5-0.5B-Instruct: 465/1319 correct, accuracy 0.353, no generation errors.
+- The streamed-artifact safeguard preserved a partial CoT run through 156 examples: 61/156 correct, accuracy 0.391, no generation errors.
+
+### Did Not Work / Caveats
+
+- A reboot interrupted the wrapper during CoT before retry_reflection started; run.log only contains the launch lines because conda/tee output was buffered, but JSONL, metrics, and report artifacts survived.
+- This remains a local Qwen zero-shot protocol check, not a PaLM 540B reported-protocol reproduction; check-targets marks CoT as protocol_mismatch for model and prompt.
+
+### Left To Do
+
+- Resume or rerun the full tier for CoT and retry_reflection, preferably with unbuffered Python/stdout handling if live terminal logs are important.
