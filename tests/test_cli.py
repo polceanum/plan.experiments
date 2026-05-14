@@ -26,3 +26,14 @@ def test_prompt_baseline_help_lists_tiers(capsys):
     assert "smoke" in out
     assert "full" in out
 
+
+def test_collect_prompt_caches_help_lists_config(capsys):
+    try:
+        main(["collect-prompt-caches", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--config" in out
+    assert "--layer-mode" in out
+    assert "--resume" in out
+

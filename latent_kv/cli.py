@@ -14,8 +14,10 @@ from .benchmarks import load_examples, verify_output
 from .brief import get_brief
 from .cache import choose_device, collect_one, load_model_and_tokenizer, set_seed
 from .compressors import run_compression
+from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .metrics import evaluate_run
+from .prompt_cache_collection import run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .research_log import append_research_log
@@ -259,6 +261,38 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_collect_prompt_caches(args: argparse.Namespace) -> int:
+    resolved = resolve_experiment_config(Path(args.config)) if args.config else None
+    config_dataset = resolved.dataset if resolved is not None else {}
+    config_prompt = resolved.prompt if resolved is not None else {}
+    config_model = resolved.model if resolved is not None else {}
+    config_cache = resolved.cache if resolved is not None else {}
+    tier_name, limit, max_new_tokens = resolve_baseline_tier(
+        args.baseline_tier or str(config_prompt.get("baseline_tier") or "custom"),
+        limit=args.limit if args.limit is not None else config_dataset.get("limit"),
+        max_new_tokens=args.max_new_tokens if args.max_new_tokens is not None else config_prompt.get("max_new_tokens"),
+    )
+    payload = run_prompt_cache_collection(
+        run_dir=Path(args.run),
+        benchmark=args.benchmark or str(config_dataset.get("benchmark") or "hanoi"),
+        baseline=args.baseline or str(config_prompt.get("baseline") or "standard"),
+        model_id=args.model_id or str(config_model.get("model_id") or SMOKE_MODEL),
+        limit=limit,
+        seed=args.seed if args.seed is not None else int(config_dataset.get("seed") or 0),
+        max_new_tokens=max_new_tokens,
+        device_name=args.device or str(config_model.get("device") or "auto"),
+        baseline_tier=tier_name,
+        layer_mode=args.layer_mode or str(config_cache.get("layer_mode") or "all"),
+        capture_hidden=args.capture_hidden or bool(config_cache.get("capture_hidden") or False),
+        resume=args.resume,
+        resolved_config=resolved,
+    )
+    _write_basic_plots(Path(args.run))
+    print(f"Wrote cache-backed prompt records to {args.run}")
+    print(f"Baselines: {len(payload.get('baselines', []))}")
+    return 0
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     append_research_log(
         log_path=Path(args.path),
@@ -414,6 +448,30 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--temperature", type=float, default=0.7)
     prompt.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
     prompt.set_defaults(func=cmd_prompt_baseline)
+
+    prompt_cache = sub.add_parser(
+        "collect-prompt-caches",
+        help="Collect prompt-protocol outputs plus replayable KV cache bundles",
+    )
+    prompt_cache.add_argument("--run", required=True)
+    prompt_cache.add_argument("--config", default=None, help="YAML/JSON experiment config to resolve and save with the run.")
+    prompt_cache.add_argument("--benchmark", default=None, choices=["hanoi", "sudoku", "game24", "gsm8k", "humaneval", "all"])
+    prompt_cache.add_argument("--baseline", default=None, choices=["standard", "cot", "retry_reflection"])
+    prompt_cache.add_argument("--model-id", default=None)
+    prompt_cache.add_argument("--device", default=None)
+    prompt_cache.add_argument(
+        "--baseline-tier",
+        default=None,
+        choices=sorted(BASELINE_TIERS),
+        help="Named baseline budget preset. Explicit --limit or --max-new-tokens override the preset values.",
+    )
+    prompt_cache.add_argument("--limit", type=int, default=None)
+    prompt_cache.add_argument("--seed", type=int, default=None)
+    prompt_cache.add_argument("--max-new-tokens", type=int, default=None)
+    prompt_cache.add_argument("--layer-mode", default=None, help="all, lower, middle, upper, or comma-separated indices")
+    prompt_cache.add_argument("--capture-hidden", action="store_true")
+    prompt_cache.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
+    prompt_cache.set_defaults(func=cmd_collect_prompt_caches)
 
     log = sub.add_parser("log", help="Append a structured research-log entry")
     log.add_argument("--path", default="docs/RESEARCH_LOG.md")

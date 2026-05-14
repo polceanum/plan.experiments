@@ -1,0 +1,29 @@
+name: qwen_gsm8k_cot_cache_500
+model:
+  profile: qwen2.5-0.5b-instruct
+  model_id: /Users/mike/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775
+  device: auto
+dataset:
+  benchmark: gsm8k
+  limit: 500
+  seed: 0
+prompt:
+  baseline: cot
+  baseline_tier: custom
+  max_new_tokens: 320
+cache:
+  scope: prompt
+  layer_mode: all
+  storage_dtype: bfloat16
+  capture_hidden: false
+codec:
+  type: rae_lstm_seq2seq
+  latent_dim: 128
+  geometry_only: false
+training:
+  epochs: 20
+  batch_size: 16
+  weight_decay: 0.01
+scale:
+  examples: 500
+  estimated_tokens_per_cache: 100

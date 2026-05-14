@@ -132,3 +132,23 @@ conda run -n orpheus python -m latent_kv prompt-baseline \
   --baseline standard cot retry_reflection \
   --model-id /path/to/local/model/snapshot
 ```
+
+## Config-Driven Cache Collection
+
+Latent-manifold experiments should start from cache-backed prompt records: one
+row per task plus a replayable KV cache bundle under `caches/`. The
+`collect-prompt-caches` command accepts a versioned config, resolves the local
+HuggingFace model profile, writes `resolved_config.json`, then captures caches
+for the selected prompt protocol.
+
+```bash
+LATENT_KV_ALLOW_DATASET_DOWNLOAD=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false \
+conda run -n orpheus python -m latent_kv collect-prompt-caches \
+  --run runs/qwen_cache_smoke \
+  --config configs/qwen_gsm8k_cot_cache_smoke.yaml
+```
+
+The resolved config records model-derived cache dimensions such as layer count,
+KV heads, head dimension, selected layers, bytes per token, and storage estimate.
+These values are derived from the local model config rather than hardcoded, so
+larger local models can be added through additional config files.

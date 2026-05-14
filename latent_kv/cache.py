@@ -146,6 +146,27 @@ def load_model_and_tokenizer(model_id: str, device: torch.device, local_files_on
     return model, tokenizer
 
 
+def encode_prompt_for_model(
+    tokenizer: Any,
+    prompt: str,
+    device: torch.device,
+    use_chat_template: bool = True,
+) -> dict[str, torch.Tensor]:
+    if use_chat_template and getattr(tokenizer, "chat_template", None):
+        input_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        encoded = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+        }
+    else:
+        encoded = tokenizer(prompt, return_tensors="pt")
+    return {key: value.to(device) for key, value in encoded.items()}
+
+
 @torch.no_grad()
 def capture_prompt_cache(
     model: Any,
@@ -154,9 +175,9 @@ def capture_prompt_cache(
     device: torch.device,
     layer_mode: str = "all",
     capture_hidden: bool = False,
+    use_chat_template: bool = True,
 ) -> tuple[CacheTuple, list[int], int, Any, torch.Tensor, torch.Tensor, torch.Tensor]:
-    encoded = tokenizer(prompt, return_tensors="pt")
-    encoded = {key: value.to(device) for key, value in encoded.items()}
+    encoded = encode_prompt_for_model(tokenizer, prompt, device, use_chat_template=use_chat_template)
     outputs = model(
         **encoded,
         use_cache=True,
@@ -189,8 +210,7 @@ def generate_text(
     seed: int,
 ) -> tuple[str, int, float]:
     set_seed(seed)
-    encoded = tokenizer(prompt, return_tensors="pt")
-    encoded = {key: value.to(device) for key, value in encoded.items()}
+    encoded = encode_prompt_for_model(tokenizer, prompt, device, use_chat_template=True)
     start = time.perf_counter()
     generated = model.generate(
         **encoded,
