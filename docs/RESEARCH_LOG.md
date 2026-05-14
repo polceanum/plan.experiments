@@ -295,3 +295,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Next try layer/head-aware or relative reconstruction losses, with separate key/value diagnostics and possibly logit-matching replay loss. Treat VAE/KL as a separate generative-latent experiment; for faithful RAE reconstruction, adding KL would likely hurt unless carefully beta-scheduled.
+
+## 2026-05-14 - fixed variable-length cache vector alignment
+
+### Worked
+
+- Found the main reconstruction bug: variable-length prompt caches were flattened tightly and padded only at the end, so layer/key/value boundaries shifted across examples and training columns mixed unrelated KV coordinates. Fixed compression to pad each layer/key/value tensor to shared token shapes before flattening, while saving compact original-shape reconstructions for existing validation/replay consumers. Tests passed: 52 total. On runs/qwen_cache_smoke_10, aligned 240-epoch RAE improved mean validation MSE from 5.56810 to 0.36029, KL(original||reconstructed) from 13.58 to 0.875, logit cosine from 0.454 to 0.788, and first cache-dependent top-1 match from 0/10 to 6/10. A 600-epoch run improved validation MSE further to 0.33457 and logit cosine to 0.83974, with top-1 still 6/10.
+
+### Did Not Work / Caveats
+
+- Behavioural GSM8K replay remains 0/10. After the alignment fix the outputs are no longer garbage token streams; they are fluent generic math solutions that often ignore the original problem details. Longer training is now decelerating and only marginally improves replay fidelity, so the remaining issue is rollout-faithful reconstruction, not the earlier flattened-vector alignment bug.
+
+### Left To Do
+
+- Add multi-step replay-fidelity diagnostics and train with replay-sensitive objectives or layer/head/value-aware losses; first-step top-1 is no longer enough because coherent continuations can still drift away from the source problem over several tokens.

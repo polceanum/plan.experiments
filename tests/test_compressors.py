@@ -5,7 +5,7 @@ import torch
 from latent_kv.cache import CacheTuple, flatten_cache, load_cache_bundle, save_cache_bundle
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
-from latent_kv.compressors import ChunkedLSTMAutoEncoder, run_compression
+from latent_kv.compressors import ChunkedLSTMAutoEncoder, load_cache_matrix, run_compression
 from latent_kv.schemas import CacheMetadata, TrajectoryRecord, append_jsonl
 from latent_kv.schemas import read_jsonl
 
@@ -199,6 +199,7 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert artifact["latent_summary"] == "last_hidden_plus_mean_encoded"
     assert artifact["chunk_projection"] == "linear_layernorm_gelu"
     assert artifact["latent_encoding_input"] == "masked_normalized_cache"
+    assert artifact["vector_alignment"] == "per_layer_key_value_token_padding"
     assert len(artifact["training_history"]) == 1
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_lstm_training.jsonl")
     assert training_rows[0]["method"] == "rae_lstm"
@@ -208,6 +209,7 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert training_rows[0]["loss_components"]["kl"] == 0.0
     assert training_rows[0]["valid_values"] == 32
     assert payload["training_log_path"].endswith("rae_lstm_training.jsonl")
+    assert payload["vector_alignment"] == "per_layer_key_value_token_padding"
     assert validation.records == 2
     assert validation.one_point_per_cache is True
     assert validation.valid_caches == 2
@@ -228,19 +230,13 @@ def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
     payload = torch.load(result.latent_path, map_location="cpu")
     artifact = torch.load(result.artifact_path, map_location="cpu")
 
-    vectors = []
-    max_length = max(payload["lengths"])
-    for cache_path in payload["cache_paths"]:
-        vector = flatten_cache(load_cache_bundle(Path(cache_path))["cache"])
-        vectors.append(torch.nn.functional.pad(vector, (0, max_length - vector.numel())))
-    x = torch.stack(vectors)
-    valid_mask = torch.zeros_like(x, dtype=torch.bool)
-    for row_idx, length in enumerate(payload["lengths"]):
-        valid_mask[row_idx, : int(length)] = True
-    normalized = ((x - artifact["normalization_mean"]) / artifact["normalization_std"]).masked_fill(~valid_mask, 0.0)
+    cache_matrix = load_cache_matrix(tmp_path)
+    normalized = ((cache_matrix.matrix - artifact["normalization_mean"]) / artifact["normalization_std"]).masked_fill(
+        ~cache_matrix.mask, 0.0
+    )
 
     model = ChunkedLSTMAutoEncoder(
-        input_dim=x.shape[1],
+        input_dim=cache_matrix.matrix.shape[1],
         latent_dim=artifact["latent_dim"],
         chunk_dim=artifact["chunk_dim"],
         hidden_dim=artifact["hidden_dim"],
@@ -250,4 +246,5 @@ def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
         expected = model.encode(normalized)
 
     assert payload["lengths"] == [16, 12]
+    assert payload["reconstructed"].shape[1] == 16
     assert torch.allclose(payload["latents"], expected)

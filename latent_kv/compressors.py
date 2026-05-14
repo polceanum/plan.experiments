@@ -18,9 +18,11 @@ from .schemas import CompressionResult, read_jsonl, write_json
 @dataclass(frozen=True)
 class CacheMatrix:
     matrix: torch.Tensor
+    mask: torch.Tensor
     paths: list[str]
     lengths: list[int]
     shapes: list[Any]
+    aligned_shapes: list[Any]
     labels: list[dict[str, Any]]
 
 
@@ -41,9 +43,66 @@ def _record_label(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _aligned_cache_shapes(shapes: list[Any]) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+    first = shapes[0]
+    aligned = []
+    for layer_idx in range(len(first)):
+        aligned_layer = []
+        for kv_idx in range(2):
+            base = list(first[layer_idx][kv_idx])
+            max_tokens = max(int(shape[layer_idx][kv_idx][-2]) for shape in shapes)
+            base[-2] = max_tokens
+            aligned_layer.append(tuple(base))
+        aligned.append((aligned_layer[0], aligned_layer[1]))
+    return aligned
+
+
+def _flatten_to_shapes(cache: Any, target_shapes: list[Any]) -> torch.Tensor:
+    parts = []
+    for layer_idx, (key, value) in enumerate(cache):
+        for tensor, target_shape in [(key, target_shapes[layer_idx][0]), (value, target_shapes[layer_idx][1])]:
+            target = torch.zeros(target_shape, dtype=torch.float32)
+            slices = tuple(slice(0, size) for size in tensor.shape)
+            target[slices] = tensor.detach().cpu().float()
+            parts.append(target.reshape(-1))
+    return torch.cat(parts) if parts else torch.empty(0)
+
+
+def _shape_mask(shapes: list[Any], target_shapes: list[Any]) -> torch.Tensor:
+    parts = []
+    for layer_idx, (key_shape, value_shape) in enumerate(shapes):
+        for source_shape, target_shape in [(key_shape, target_shapes[layer_idx][0]), (value_shape, target_shapes[layer_idx][1])]:
+            target = torch.zeros(target_shape, dtype=torch.bool)
+            slices = tuple(slice(0, size) for size in source_shape)
+            target[slices] = True
+            parts.append(target.reshape(-1))
+    return torch.cat(parts) if parts else torch.empty(0, dtype=torch.bool)
+
+
+def _aligned_to_compact(vector: torch.Tensor, shapes: list[Any], aligned_shapes: list[Any]) -> torch.Tensor:
+    vector = vector.detach().cpu().float().reshape(-1)
+    offset = 0
+    parts = []
+    for layer_idx, (key_shape, value_shape) in enumerate(shapes):
+        for source_shape, aligned_shape in [(key_shape, aligned_shapes[layer_idx][0]), (value_shape, aligned_shapes[layer_idx][1])]:
+            size = int(torch.tensor(aligned_shape).prod().item())
+            tensor = vector[offset : offset + size].reshape(aligned_shape)
+            offset += size
+            slices = tuple(slice(0, dim) for dim in source_shape)
+            parts.append(tensor[slices].reshape(-1))
+    return torch.cat(parts) if parts else torch.empty(0)
+
+
+def _compact_reconstructions(reconstructed: torch.Tensor, shapes: list[Any], aligned_shapes: list[Any]) -> torch.Tensor:
+    compact = [_aligned_to_compact(row, shape, aligned_shapes) for row, shape in zip(reconstructed, shapes)]
+    max_len = max(int(row.numel()) for row in compact)
+    padded = [torch.nn.functional.pad(row, (0, max_len - row.numel())) for row in compact]
+    return torch.stack(padded).float()
+
+
 def load_cache_matrix(run_dir: Path) -> CacheMatrix:
     records = read_jsonl(run_dir / "records.jsonl")
-    vectors = []
+    caches = []
     paths = []
     shapes = []
     labels = []
@@ -53,25 +112,23 @@ def load_cache_matrix(run_dir: Path) -> CacheMatrix:
             continue
         bundle = load_cache_bundle(Path(cache_path))
         cache = bundle["cache"]
-        vectors.append(flatten_cache(cache))
+        caches.append(cache)
         paths.append(cache_path)
         shapes.append(bundle.get("shapes") or cache_shapes(cache))
         labels.append(_record_label(record))
-    if not vectors:
+    if not caches:
         raise ValueError(f"No cache vectors found under {run_dir}")
-    max_len = max(vector.numel() for vector in vectors)
-    padded = []
-    lengths = []
-    for vector in vectors:
-        lengths.append(int(vector.numel()))
-        if vector.numel() < max_len:
-            vector = torch.nn.functional.pad(vector, (0, max_len - vector.numel()))
-        padded.append(vector)
+    aligned_shapes = _aligned_cache_shapes(shapes)
+    vectors = [_flatten_to_shapes(cache, aligned_shapes) for cache in caches]
+    masks = [_shape_mask(shape, aligned_shapes) for shape in shapes]
+    lengths = [int(flatten_cache(cache).numel()) for cache in caches]
     return CacheMatrix(
-        matrix=torch.stack(padded).float(),
+        matrix=torch.stack(vectors).float(),
+        mask=torch.stack(masks),
         paths=paths,
         lengths=lengths,
         shapes=shapes,
+        aligned_shapes=aligned_shapes,
         labels=labels,
     )
 
@@ -86,13 +143,6 @@ def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
-
-
-def _valid_value_mask(x: torch.Tensor, lengths: list[int]) -> torch.Tensor:
-    valid_mask = torch.zeros_like(x, dtype=torch.bool)
-    for row_idx, length in enumerate(lengths):
-        valid_mask[row_idx, : int(length)] = True
-    return valid_mask
 
 
 @dataclass
@@ -265,7 +315,7 @@ def train_autoencoder(
 
 def train_lstm_seq2seq_autoencoder(
     x: torch.Tensor,
-    lengths: list[int],
+    valid_mask: torch.Tensor,
     latent_dim: int,
     epochs: int = 1,
     lr: float = 1e-3,
@@ -277,7 +327,6 @@ def train_lstm_seq2seq_autoencoder(
     log_every: int = 1,
 ) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
-    valid_mask = _valid_value_mask(x, lengths)
     counts = valid_mask.sum(dim=0, keepdim=True).clamp_min(1).float()
     masked_x = x.masked_fill(~valid_mask, 0.0)
     mean = masked_x.sum(dim=0, keepdim=True) / counts
@@ -344,6 +393,7 @@ def train_lstm_seq2seq_autoencoder(
         "latent_summary": "last_hidden_plus_mean_encoded",
         "chunk_projection": "linear_layernorm_gelu",
         "latent_encoding_input": "masked_normalized_cache",
+        "vector_alignment": "per_layer_key_value_token_padding",
     }
     return model, reconstructed, mse, stats, history
 
@@ -372,6 +422,7 @@ def run_compression(
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
+    valid_mask = cache_matrix.mask
     artifact_dir = run_dir / "compressions"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     method = method.lower()
@@ -406,7 +457,7 @@ def run_compression(
     elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
         compressor, reconstructed, mse, stats, history = train_lstm_seq2seq_autoencoder(
             x,
-            cache_matrix.lengths,
+            valid_mask,
             latent_dim,
             epochs=epochs,
             lr=lr,
@@ -419,7 +470,7 @@ def run_compression(
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
-        normalized_for_latents = ((x - mean) / std).masked_fill(~_valid_value_mask(x, cache_matrix.lengths), 0.0)
+        normalized_for_latents = ((x - mean) / std).masked_fill(~valid_mask, 0.0)
         with torch.no_grad():
             z = compressor.encode(normalized_for_latents).detach()
         artifact.update(
@@ -440,17 +491,21 @@ def run_compression(
     else:
         raise ValueError("method must be random, pca_svd, autoencoder, or retrieval")
 
-    mse = reconstruction_mse(x, reconstructed)
+    compact_reconstructed = _compact_reconstructions(reconstructed, cache_matrix.shapes, cache_matrix.aligned_shapes)
+    compact_original = _compact_reconstructions(x, cache_matrix.shapes, cache_matrix.aligned_shapes)
+    mse = reconstruction_mse(compact_original, compact_reconstructed)
     latent_path = artifact_dir / f"{method}_latents.pt"
     artifact_path = artifact_dir / f"{method}_artifact.pt"
     torch.save(
         {
             "latents": z.detach().cpu(),
-            "reconstructed": reconstructed.detach().cpu(),
+            "reconstructed": compact_reconstructed.detach().cpu(),
             "cache_paths": cache_matrix.paths,
             "source_labels": cache_matrix.labels,
             "lengths": cache_matrix.lengths,
             "shapes": cache_matrix.shapes,
+            "aligned_shapes": cache_matrix.aligned_shapes,
+            "vector_alignment": "per_layer_key_value_token_padding",
             "method": method,
             "latent_dim": latent_dim,
             "codec_contract": {
