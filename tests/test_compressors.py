@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from latent_kv.cache import CacheTuple, save_cache_bundle
+from latent_kv.cache import CacheTuple, flatten_cache, load_cache_bundle, save_cache_bundle
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
 from latent_kv.compressors import ChunkedLSTMAutoEncoder, run_compression
@@ -13,6 +13,13 @@ from latent_kv.schemas import read_jsonl
 def _cache(offset: int) -> CacheTuple:
     key = torch.arange(offset, offset + 8, dtype=torch.float32).reshape(1, 1, 4, 2)
     value = torch.arange(offset + 8, offset + 16, dtype=torch.float32).reshape(1, 1, 4, 2)
+    return ((key, value),)
+
+
+def _cache_with_tokens(offset: int, tokens: int) -> CacheTuple:
+    values = torch.arange(offset, offset + tokens * 4, dtype=torch.float32)
+    key = values[: tokens * 2].reshape(1, 1, tokens, 2)
+    value = values[tokens * 2 :].reshape(1, 1, tokens, 2)
     return ((key, value),)
 
 
@@ -36,6 +43,48 @@ def _write_run(tmp_path: Path) -> None:
             metadata,
             input_ids=torch.tensor([[1, 2, 3, 4]]),
             attention_mask=torch.tensor([[1, 1, 1, 1]]),
+            last_logits=torch.randn(1, 10),
+        )
+        append_jsonl(
+            tmp_path / "records.jsonl",
+            TrajectoryRecord(
+                run_id=tmp_path.name,
+                benchmark="hanoi",
+                task_id=f"task_{idx}",
+                model_id="fake",
+                seed=0,
+                attempt_id=0,
+                prompt="p",
+                target="t",
+                output_text="o",
+                parsed_answer="o",
+                correct=bool(idx),
+                retry_index=0,
+                cache_path=str(cache_path),
+            ),
+        )
+
+
+def _write_variable_length_run(tmp_path: Path) -> None:
+    for idx, tokens in enumerate([4, 3]):
+        cache_path = tmp_path / "caches" / f"{idx}.pt"
+        metadata = CacheMetadata(
+            model_id="fake",
+            tokenizer_id="fake",
+            dtype="torch.float32",
+            device="cpu",
+            layers=1,
+            selected_layers=[0],
+            selected_heads=None,
+            token_count=tokens,
+            cache_path=str(cache_path),
+        )
+        save_cache_bundle(
+            cache_path,
+            _cache_with_tokens(idx * 100, tokens),
+            metadata,
+            input_ids=torch.ones(1, tokens, dtype=torch.long),
+            attention_mask=torch.ones(1, tokens, dtype=torch.long),
             last_logits=torch.randn(1, 10),
         )
         append_jsonl(
@@ -146,6 +195,7 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert artifact["decoder_conditioning"] == "latent_repeated_input_plus_learned_position"
     assert artifact["latent_summary"] == "last_hidden_plus_mean_encoded"
     assert artifact["chunk_projection"] == "linear_layernorm_gelu"
+    assert artifact["latent_encoding_input"] == "masked_normalized_cache"
     assert len(artifact["training_history"]) == 1
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_lstm_training.jsonl")
     assert training_rows[0]["method"] == "rae_lstm"
@@ -156,3 +206,43 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert validation.records == 2
     assert validation.one_point_per_cache is True
     assert validation.valid_caches == 2
+
+
+def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+    result = run_compression(
+        tmp_path,
+        method="rae_lstm",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        chunk_dim=4,
+        hidden_dim=5,
+        log_every=0,
+    )
+    payload = torch.load(result.latent_path, map_location="cpu")
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+
+    vectors = []
+    max_length = max(payload["lengths"])
+    for cache_path in payload["cache_paths"]:
+        vector = flatten_cache(load_cache_bundle(Path(cache_path))["cache"])
+        vectors.append(torch.nn.functional.pad(vector, (0, max_length - vector.numel())))
+    x = torch.stack(vectors)
+    valid_mask = torch.zeros_like(x, dtype=torch.bool)
+    for row_idx, length in enumerate(payload["lengths"]):
+        valid_mask[row_idx, : int(length)] = True
+    normalized = ((x - artifact["normalization_mean"]) / artifact["normalization_std"]).masked_fill(~valid_mask, 0.0)
+
+    model = ChunkedLSTMAutoEncoder(
+        input_dim=x.shape[1],
+        latent_dim=artifact["latent_dim"],
+        chunk_dim=artifact["chunk_dim"],
+        hidden_dim=artifact["hidden_dim"],
+    )
+    model.load_state_dict(artifact["state_dict"])
+    with torch.no_grad():
+        expected = model.encode(normalized)
+
+    assert payload["lengths"] == [16, 12]
+    assert torch.allclose(payload["latents"], expected)

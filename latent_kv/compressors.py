@@ -88,6 +88,13 @@ def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
+def _valid_value_mask(x: torch.Tensor, lengths: list[int]) -> torch.Tensor:
+    valid_mask = torch.zeros_like(x, dtype=torch.bool)
+    for row_idx, length in enumerate(lengths):
+        valid_mask[row_idx, : int(length)] = True
+    return valid_mask
+
+
 @dataclass
 class RandomProjectionCompressor:
     input_dim: int
@@ -270,9 +277,7 @@ def train_lstm_seq2seq_autoencoder(
     log_every: int = 1,
 ) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
-    valid_mask = torch.zeros_like(x, dtype=torch.bool)
-    for row_idx, length in enumerate(lengths):
-        valid_mask[row_idx, : int(length)] = True
+    valid_mask = _valid_value_mask(x, lengths)
     counts = valid_mask.sum(dim=0, keepdim=True).clamp_min(1).float()
     masked_x = x.masked_fill(~valid_mask, 0.0)
     mean = masked_x.sum(dim=0, keepdim=True) / counts
@@ -333,6 +338,7 @@ def train_lstm_seq2seq_autoencoder(
         "decoder_conditioning": "latent_repeated_input_plus_learned_position",
         "latent_summary": "last_hidden_plus_mean_encoded",
         "chunk_projection": "linear_layernorm_gelu",
+        "latent_encoding_input": "masked_normalized_cache",
     }
     return model, reconstructed, mse, stats, history
 
@@ -408,8 +414,9 @@ def run_compression(
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
+        normalized_for_latents = ((x - mean) / std).masked_fill(~_valid_value_mask(x, cache_matrix.lengths), 0.0)
         with torch.no_grad():
-            z = compressor.encode((x - mean) / std).detach()
+            z = compressor.encode(normalized_for_latents).detach()
         artifact.update(
             {
                 "state_dict": compressor.state_dict(),

@@ -253,3 +253,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Try more expressive one-point decoders or loss terms aligned with replay-sensitive KV structure, such as layer/head-aware chunking, per-layer normalization, residual reconstruction from retrieval/mean cache, or token-position-aware objectives before rerunning behavioural replay.
+
+## 2026-05-14 - wider projected RAE reconstruction check
+
+### Worked
+
+- Fixed RAE artifact latent encoding so saved point latents use the same masked-normalized variable-length inputs as training; added a variable-length regression test. With chunk projection, a wider hidden_dim=256, latent_dim=256, 80-epoch local run on runs/qwen_cache_smoke_10 reached 10/10 structurally valid reconstructions and mean validation MSE 16.66987, down from 27.08518.
+
+### Did Not Work / Caveats
+
+- Despite the large reconstruction-MSE improvement, GSM8K behavioural replay remained 0/10 for rae_lstm; reconstructed continuations averaged 79.3 tokens versus 261.9 source replay budget, suggesting lower MSE alone is not yet preserving replay dynamics.
+
+### Left To Do
+
+- Add replay-sensitive diagnostics and losses: token-level replay agreement, first-token KL/logit similarity from reconstructed caches, layer/head-wise MSE, and optionally train against a residual or layer-aware representation before another behaviour run.
