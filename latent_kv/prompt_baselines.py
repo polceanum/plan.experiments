@@ -233,10 +233,13 @@ def _write_prompt_records(run_dir: Path, baseline: str, rows: list[TrajectoryRec
     return path
 
 
-def _prepare_prompt_records(run_dir: Path, baseline: str) -> Path:
+def _prepare_prompt_records(run_dir: Path, baseline: str, resume: bool = False) -> Path:
     path = run_dir / "behavior" / f"{baseline}_records.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("", encoding="utf-8")
+    if not resume:
+        path.write_text("", encoding="utf-8")
+    elif not path.exists():
+        path.write_text("", encoding="utf-8")
     return path
 
 
@@ -274,6 +277,7 @@ def run_prompt_baseline(
     samples: int = 5,
     temperature: float = 0.7,
     baseline_tier: str = "custom",
+    resume: bool = False,
 ) -> dict[str, Any]:
     baseline = baseline.lower()
     if baseline not in PROMPT_PROTOCOLS:
@@ -298,8 +302,9 @@ def run_prompt_baseline(
         chat_template=uses_chat_template,
         baseline_tier=baseline_tier,
     )
-    records: list[TrajectoryRecord] = []
-    record_path = _prepare_prompt_records(run_dir, baseline)
+    record_path = _prepare_prompt_records(run_dir, baseline, resume=resume)
+    records: list[dict[str, Any]] = read_jsonl(record_path) if resume else []
+    completed_task_ids = {str(row.get("task_id")) for row in records}
     extra = {
         f"prompt_{baseline}_records": str(record_path),
         f"prompt_{baseline}_local_model": model_id,
@@ -307,10 +312,17 @@ def run_prompt_baseline(
         f"prompt_{baseline}_baseline_tier": baseline_tier,
         f"prompt_{baseline}_protocol": protocol_metadata,
         f"prompt_{baseline}_protocol_match": False,
+        f"prompt_{baseline}_resume": resume,
     }
-    payload = _merge_metrics(run_dir, baseline, [], extra)
+    payload = _merge_metrics(run_dir, baseline, records, extra)
 
     for idx, example in enumerate(examples):
+        if example.task_id in completed_task_ids:
+            print(
+                f"[{idx + 1}/{len(examples)}] {baseline} {example.task_id}: skipped existing record",
+                flush=True,
+            )
+            continue
         start = time.perf_counter()
         error = None
         if baseline == "self_consistency":
@@ -399,17 +411,19 @@ def run_prompt_baseline(
             }
             | sample_metadata,
         )
-        records.append(record)
+        record_dict = record.__dict__
+        records.append(record_dict)
+        completed_task_ids.add(example.task_id)
         _append_prompt_record(record_path, record)
         payload = _merge_metrics(
             run_dir,
             baseline,
-            [record.__dict__ for record in records],
+            records,
             extra
             | {
                 f"prompt_{baseline}_completed_examples": len(records),
                 f"prompt_{baseline}_failed_examples": sum(
-                    1 for row in records if row.metadata.get("generation_error")
+                    1 for row in records if (row.get("metadata") or {}).get("generation_error")
                 ),
             },
         )
@@ -422,12 +436,12 @@ def run_prompt_baseline(
     return _merge_metrics(
         run_dir,
         baseline,
-        [record.__dict__ for record in records],
+        records,
         extra
         | {
             f"prompt_{baseline}_completed_examples": len(records),
             f"prompt_{baseline}_failed_examples": sum(
-                1 for row in records if row.metadata.get("generation_error")
+                1 for row in records if (row.get("metadata") or {}).get("generation_error")
             )
         },
     )

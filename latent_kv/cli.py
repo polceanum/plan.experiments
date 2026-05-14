@@ -250,6 +250,7 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
             samples=args.samples,
             temperature=args.temperature,
             baseline_tier=tier_name,
+            resume=args.resume,
         )
         print(f"Scored local prompt baseline: {baseline}")
     _write_basic_plots(run_dir)
@@ -411,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--max-new-tokens", type=int, default=None)
     prompt.add_argument("--samples", type=int, default=5)
     prompt.add_argument("--temperature", type=float, default=0.7)
+    prompt.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
     prompt.set_defaults(func=cmd_prompt_baseline)
 
     log = sub.add_parser("log", help="Append a structured research-log entry")

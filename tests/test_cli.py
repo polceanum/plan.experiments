@@ -22,6 +22,7 @@ def test_prompt_baseline_help_lists_tiers(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--baseline-tier" in out
+    assert "--resume" in out
     assert "smoke" in out
     assert "full" in out
 
