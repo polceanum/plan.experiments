@@ -17,11 +17,15 @@ from .schemas import read_json, read_jsonl, write_json
 class ReplayFidelitySummary:
     method: str
     records: int
+    steps: int
     mean_logit_cosine: float | None
     mean_logit_mse: float | None
     mean_kl_original_to_reconstructed: float | None
     top1_match_rate: float | None
     source_second_token_match_rate: float | None
+    per_step_top1_match_rate: list[float | None]
+    per_step_mean_logit_cosine: list[float | None]
+    per_step_mean_kl_original_to_reconstructed: list[float | None]
     result_path: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -103,6 +107,51 @@ def _next_logits_after_cache_token(
     return outputs.logits[:, -1, :].detach().cpu()
 
 
+@torch.no_grad()
+def _teacher_forced_replay_logits(
+    bundle: dict[str, Any],
+    cache: Any,
+    token_ids: torch.Tensor,
+    model: Any,
+    device: torch.device,
+) -> list[torch.Tensor]:
+    input_ids = bundle.get("input_ids")
+    attention_mask = bundle.get("attention_mask")
+    if input_ids is None:
+        raise ValueError("Bundle must contain input_ids for replay-fidelity diagnostics")
+    prompt_len = int(input_ids.shape[-1])
+    current_mask = (
+        attention_mask.to(device)
+        if attention_mask is not None
+        else torch.ones((1, prompt_len), dtype=torch.long, device=device)
+    )
+    past = cache_to_device(cache, device)
+    forward_parameters = _forward_parameters(model)
+    logits_by_step: list[torch.Tensor] = []
+    for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
+        current_mask = torch.cat(
+            [current_mask, torch.ones((1, 1), dtype=current_mask.dtype, device=device)],
+            dim=-1,
+        )
+        next_token = torch.tensor([[int(token_id)]], dtype=torch.long, device=device)
+        model_kwargs = {
+            "input_ids": next_token,
+            "attention_mask": current_mask,
+            "past_key_values": past,
+            "use_cache": True,
+            "return_dict": True,
+        }
+        replay_position = torch.tensor([[prompt_len + step_idx]], dtype=torch.long, device=device)
+        if "position_ids" in forward_parameters:
+            model_kwargs["position_ids"] = replay_position
+        if "cache_position" in forward_parameters:
+            model_kwargs["cache_position"] = replay_position.reshape(-1)
+        outputs = model(**model_kwargs)
+        past = outputs.past_key_values
+        logits_by_step.append(outputs.logits[:, -1, :].detach().cpu())
+    return logits_by_step
+
+
 def _load_reconstructed_cache_from_payload(payload: dict[str, Any], cache_path: str) -> Any:
     try:
         idx = list(payload["cache_paths"]).index(cache_path)
@@ -119,6 +168,7 @@ def score_replay_fidelity(
     model_id: str | None = None,
     device_name: str = "auto",
     limit: int | None = None,
+    steps: int = 1,
 ) -> ReplayFidelitySummary:
     method = method.lower()
     latent_path = run_dir / "compressions" / f"{method}_latents.pt"
@@ -133,24 +183,38 @@ def score_replay_fidelity(
 
     chosen_model = model_id or str(records[0]["model_id"])
     device = choose_device(device_name)
-    model, _tokenizer = load_model_and_tokenizer(chosen_model, device, local_files_only=True)
+    model, tokenizer = load_model_and_tokenizer(chosen_model, device, local_files_only=True)
     rows: list[dict[str, Any]] = []
 
     for record in records:
         cache_path = str(record["cache_path"])
         bundle = load_cache_bundle(Path(cache_path))
-        first_token = _first_replay_token_id(bundle, model)
-        original_logits = _next_logits_after_cache_token(bundle, bundle["cache"], first_token, model, device)
         reconstructed_cache = _load_reconstructed_cache_from_payload(payload, cache_path)
-        reconstructed_logits = _next_logits_after_cache_token(bundle, reconstructed_cache, first_token, model, device)
-        comparison = _logit_comparison(original_logits, reconstructed_logits)
         generation_token_ids = bundle.get("generation_token_ids")
+        first_token = _first_replay_token_id(bundle, model)
+        if generation_token_ids is not None and int(generation_token_ids.numel()) > 0:
+            replay_tokens = generation_token_ids.reshape(-1)[: max(1, int(steps))]
+            replay_token_source = "bundle_generation_token_ids"
+        elif record.get("output_text"):
+            encoded_output = tokenizer.encode(str(record["output_text"]), add_special_tokens=False)
+            replay_tokens = torch.tensor(encoded_output[: max(1, int(steps))], dtype=torch.long)
+            replay_token_source = "record_output_text_tokenized"
+        else:
+            replay_tokens = torch.tensor([first_token], dtype=torch.long)
+            replay_token_source = "first_replay_token_only"
+        original_steps = _teacher_forced_replay_logits(bundle, bundle["cache"], replay_tokens, model, device)
+        reconstructed_steps = _teacher_forced_replay_logits(bundle, reconstructed_cache, replay_tokens, model, device)
+        step_rows = []
+        for step_idx, (original_logits, reconstructed_logits) in enumerate(zip(original_steps, reconstructed_steps), start=1):
+            step_rows.append({"step": step_idx, **_logit_comparison(original_logits, reconstructed_logits)})
+        comparison = dict(step_rows[0])
+        comparison.pop("step", None)
         source_second_token = None
         if generation_token_ids is not None and int(generation_token_ids.numel()) >= 2:
             source_second_token = int(generation_token_ids.reshape(-1)[1].item())
             comparison["source_second_token"] = source_second_token
-            comparison["source_second_token_original_rank"] = _token_rank(original_logits, source_second_token)
-            comparison["source_second_token_reconstructed_rank"] = _token_rank(reconstructed_logits, source_second_token)
+            comparison["source_second_token_original_rank"] = _token_rank(original_steps[0], source_second_token)
+            comparison["source_second_token_reconstructed_rank"] = _token_rank(reconstructed_steps[0], source_second_token)
             comparison["source_second_token_match"] = bool(
                 int(comparison["reconstructed_top1"]) == source_second_token
             )
@@ -159,6 +223,9 @@ def score_replay_fidelity(
                 "task_id": record.get("task_id"),
                 "cache_path": cache_path,
                 "first_replay_token": first_token,
+                "replay_tokens": [int(token_id) for token_id in replay_tokens.reshape(-1).tolist()],
+                "replay_token_source": replay_token_source,
+                "steps": step_rows,
                 **comparison,
             }
         )
@@ -171,15 +238,35 @@ def score_replay_fidelity(
         values = [1.0 if row[key] else 0.0 for row in rows if key in row]
         return (sum(values) / len(values)) if values else None
 
+    def per_step_mean_float(key: str) -> list[float | None]:
+        output = []
+        max_steps = max((len(row.get("steps", [])) for row in rows), default=0)
+        for step_idx in range(max_steps):
+            values = [float(row["steps"][step_idx][key]) for row in rows if len(row.get("steps", [])) > step_idx]
+            output.append((sum(values) / len(values)) if values else None)
+        return output
+
+    def per_step_mean_bool(key: str) -> list[float | None]:
+        output = []
+        max_steps = max((len(row.get("steps", [])) for row in rows), default=0)
+        for step_idx in range(max_steps):
+            values = [1.0 if row["steps"][step_idx][key] else 0.0 for row in rows if len(row.get("steps", [])) > step_idx]
+            output.append((sum(values) / len(values)) if values else None)
+        return output
+
     out_path = run_dir / "compressions" / f"{method}_replay_fidelity.json"
     summary = ReplayFidelitySummary(
         method=method,
         records=len(rows),
+        steps=max((len(row.get("steps", [])) for row in rows), default=0),
         mean_logit_cosine=mean_float("logit_cosine"),
         mean_logit_mse=mean_float("logit_mse"),
         mean_kl_original_to_reconstructed=mean_float("kl_original_to_reconstructed"),
         top1_match_rate=mean_bool("top1_match"),
         source_second_token_match_rate=mean_bool("source_second_token_match"),
+        per_step_top1_match_rate=per_step_mean_bool("top1_match"),
+        per_step_mean_logit_cosine=per_step_mean_float("logit_cosine"),
+        per_step_mean_kl_original_to_reconstructed=per_step_mean_float("kl_original_to_reconstructed"),
         result_path=str(out_path),
     )
     write_json(out_path, {"summary": summary.to_dict(), "records": rows})
@@ -195,5 +282,9 @@ def score_replay_fidelity(
     extra[f"{prefix}_mean_kl_original_to_reconstructed"] = summary.mean_kl_original_to_reconstructed
     extra[f"{prefix}_top1_match_rate"] = summary.top1_match_rate
     extra[f"{prefix}_source_second_token_match_rate"] = summary.source_second_token_match_rate
+    extra[f"{prefix}_steps"] = summary.steps
+    extra[f"{prefix}_per_step_top1_match_rate"] = summary.per_step_top1_match_rate
+    extra[f"{prefix}_per_step_mean_logit_cosine"] = summary.per_step_mean_logit_cosine
+    extra[f"{prefix}_per_step_mean_kl_original_to_reconstructed"] = summary.per_step_mean_kl_original_to_reconstructed
     write_json(metrics_path, metrics)
     return summary

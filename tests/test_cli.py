@@ -57,6 +57,7 @@ def test_replay_fidelity_help_lists_method(capsys):
     out = capsys.readouterr().out
     assert "--method" in out
     assert "--limit" in out
+    assert "--steps" in out
     assert "rae_lstm" in out
 
 

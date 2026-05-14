@@ -200,6 +200,9 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert artifact["chunk_projection"] == "linear_layernorm_gelu"
     assert artifact["latent_encoding_input"] == "masked_normalized_cache"
     assert artifact["vector_alignment"] == "per_layer_key_value_token_padding"
+    assert artifact["decoder_source"] == "latent_only"
+    assert artifact["uses_retrieval_residual"] is False
+    assert artifact["uses_per_cache_residual"] is False
     assert len(artifact["training_history"]) == 1
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_lstm_training.jsonl")
     assert training_rows[0]["method"] == "rae_lstm"

@@ -363,6 +363,7 @@ def cmd_replay_fidelity(args: argparse.Namespace) -> int:
         model_id=args.model_id,
         device_name=args.device,
         limit=args.limit,
+        steps=args.steps,
     )
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
     return 0
@@ -494,6 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay_fidelity.add_argument("--model-id", default=None)
     replay_fidelity.add_argument("--device", default="auto")
     replay_fidelity.add_argument("--limit", type=int, default=None)
+    replay_fidelity.add_argument("--steps", type=int, default=1, help="Teacher-forced generated tokens to compare.")
     replay_fidelity.set_defaults(func=cmd_replay_fidelity)
 
     training_curve = sub.add_parser(

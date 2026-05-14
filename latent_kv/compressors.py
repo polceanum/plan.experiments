@@ -394,6 +394,9 @@ def train_lstm_seq2seq_autoencoder(
         "chunk_projection": "linear_layernorm_gelu",
         "latent_encoding_input": "masked_normalized_cache",
         "vector_alignment": "per_layer_key_value_token_padding",
+        "decoder_source": "latent_only",
+        "uses_retrieval_residual": False,
+        "uses_per_cache_residual": False,
     }
     return model, reconstructed, mse, stats, history
 

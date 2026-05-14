@@ -309,3 +309,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Add multi-step replay-fidelity diagnostics and train with replay-sensitive objectives or layer/head/value-aware losses; first-step top-1 is no longer enough because coherent continuations can still drift away from the source problem over several tokens.
+
+## 2026-05-14 - latent-only high-capacity RAE rollout check
+
+### Worked
+
+- Added multi-step teacher-forced replay-fidelity diagnostics and explicit RAE artifact metadata marking decoder_source=latent_only with no retrieval or per-cache residuals. Full tests passed: 52. On runs/qwen_cache_smoke_10, a high-capacity aligned RAE (latent_dim=512, hidden_dim=512, 400 epochs, weight_decay=0.001) reached mean validation MSE 0.21915 and train MSE 0.15832. Multi-step replay fidelity improved strongly: first-step logit cosine 0.92635, KL 0.75303, and 8-step top-1 match rates [0.6, 0.6, 1.0, 0.9, 0.8, 0.8, 0.7, 0.8].
+
+### Did Not Work / Caveats
+
+- Behavioural GSM8K replay remained 0/10. The failure is no longer corrupted token streams; the model now produces fluent but generic math solutions that drift from the original problem. This means no local residual or nearest-neighbour correction should be used to make reconstruction look good, because that would bypass the meaning of the latent point.
+
+### Left To Do
+
+- Keep the one-point latent-only contract. Next improve the learned latent itself with objectives that preserve rollout behaviour, such as multi-step teacher-forced logit matching, layer/head/value-aware weighting, or training on richer cache collections; treat VAE/KL as a separate generative-latent experiment rather than a patch for RAE reconstruction.
