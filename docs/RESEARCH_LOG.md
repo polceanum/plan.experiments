@@ -205,3 +205,17 @@ short and concrete so they can be updated after every run.
 
 - Start latent-KV method experiments against the completed standard/CoT local baseline floor.
 - Run retry_reflection later with --resume when convenient, ideally overnight or after checking laptop load.
+
+## 2026-05-14 - Qwen 10-cache labelled RAE smoke
+
+### Worked
+
+- Saved the KV RAE end-to-end flow diagram; collected 10 local Qwen GSM8K CoT prompt caches with verifier labels; source prompt-cache accuracy was 2/10; retrieval and rae_lstm compression artifacts preserved source_labels; validate-codec passed for 10/10 retrieval and 10/10 rae_lstm caches; rae_lstm 5-epoch training telemetry showed loss decreasing from 1.02272 to 1.02106.
+
+### Did Not Work / Caveats
+
+- Behavioural replay with 64-token continuations reached 0/10 for original_cache, retrieval, and rae_lstm despite no replay errors. Treat this as a replay-protocol smoke, not evidence against the latent method; likely needs better continuation prompt/position handling and longer or protocol-matched decoding.
+
+### Left To Do
+
+- Improve behavioural replay protocol for prompt-cache continuations; add labelled latent diagnostics separating solved vs unsolved source caches; scale cache collection beyond 10 examples after replay checks are better understood.

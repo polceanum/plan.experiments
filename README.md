@@ -181,6 +181,10 @@ of chunks, encodes the whole sequence into one fixed-size latent point, and
 decodes that point back to a flattened cache vector that can be unpacked and
 validated with the same `validate-codec` path.
 
+See [docs/KV_RAE_FLOW.md](docs/KV_RAE_FLOW.md) for the end-to-end flow from
+problem prompt, through LLM KV-cache capture, through RAE encode/decode, and
+back into LLM replay plus verifier scoring.
+
 ```bash
 conda run -n orpheus python -m latent_kv compress \
   --run runs/qwen_cache_smoke \
