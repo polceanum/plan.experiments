@@ -281,3 +281,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run future learned-codec experiments with denser log_every for curve inspection; add logit/KL-sensitive training objectives or per-layer/head diagnostics before relying on MSE as the main reconstruction signal.
+
+## 2026-05-14 - RAE objective and replay failure diagnosis
+
+### Worked
+
+- Double-checked the RAE objective: training uses masked reconstruction MSE on normalized cache vectors with AdamW weight decay only; no KL term is used. Added explicit artifact/telemetry metadata: objective=masked_reconstruction_mse_no_kl, kl_loss_weight=0.0, and loss_components. A 240-epoch weight-decayed RAE comparison improved validation MSE to 5.56810 and produced a monotonic accelerating training curve, but replay-fidelity still had top-1 match 0/10. Record inspection showed no replay errors; reconstructed-cache outputs are degenerate token streams. Token diagnostics show the first replay token remains 'To', but the next cache-dependent top token flips from original ' solve'/' determine'/' calculate' to fragments like 's', 'I', newline, '.', 'ar', or ' PLL'.
+
+### Did Not Work / Caveats
+
+- The problem is not a KL-loss issue and not a verifier/parser artifact. Global cache metrics are misleading: per-record whole-vector cosine is high (about 0.92-0.96), yet behaviour collapses. Layer diagnostics showed poor relative reconstruction for some value-cache slices, especially early-layer values, so flattened MSE/cosine can miss replay-critical KV distortions.
+
+### Left To Do
+
+- Next try layer/head-aware or relative reconstruction losses, with separate key/value diagnostics and possibly logit-matching replay loss. Treat VAE/KL as a separate generative-latent experiment; for faithful RAE reconstruction, adding KL would likely hurt unless carefully beta-scheduled.

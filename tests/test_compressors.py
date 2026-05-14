@@ -192,6 +192,9 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert artifact["hidden_dim"] == 5
     assert artifact["weight_decay"] == 0.02
     assert artifact["masked_loss"] is True
+    assert artifact["objective"] == "masked_reconstruction_mse_no_kl"
+    assert artifact["kl_loss_weight"] == 0.0
+    assert artifact["regularization"] == "adamw_weight_decay_only"
     assert artifact["decoder_conditioning"] == "latent_repeated_input_plus_learned_position"
     assert artifact["latent_summary"] == "last_hidden_plus_mean_encoded"
     assert artifact["chunk_projection"] == "linear_layernorm_gelu"
@@ -201,6 +204,8 @@ def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
     assert training_rows[0]["method"] == "rae_lstm"
     assert training_rows[0]["epoch"] == 1
     assert training_rows[0]["masked_loss"] is True
+    assert training_rows[0]["objective"] == "masked_reconstruction_mse_no_kl"
+    assert training_rows[0]["loss_components"]["kl"] == 0.0
     assert training_rows[0]["valid_values"] == 32
     assert payload["training_log_path"].endswith("rae_lstm_training.jsonl")
     assert validation.records == 2
