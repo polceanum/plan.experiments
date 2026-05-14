@@ -153,6 +153,12 @@ KV heads, head dimension, selected layers, bytes per token, and storage estimate
 These values are derived from the local model config rather than hardcoded, so
 larger local models can be added through additional config files.
 
+Each cache bundle and latent artifact carries verifier outcome labels from the
+source sequence, including `task_id`, `target`, `parsed_answer`, `correct`, and
+the prompt protocol. This keeps every latent point tied to whether its original
+plan solved the problem, which is useful for later interpolation, sampling, and
+generated-plan filtering.
+
 Compression artifacts can be checked against the point-codec contract before
 behavioural replay. The validator confirms there is one latent point per cache,
 decodes reconstructed cache vectors back to the original KV shapes, checks for
@@ -180,5 +186,15 @@ conda run -n orpheus python -m latent_kv compress \
   --run runs/qwen_cache_smoke \
   --method rae_lstm \
   --latent-dim 128 \
-  --epochs 5
+  --epochs 5 \
+  --chunk-dim 4096 \
+  --hidden-dim 128
+```
+
+Learned codecs also write live training telemetry under
+`compressions/<method>_training.jsonl`, one JSON row per logged epoch, while
+printing the same progress to stdout. For longer runs, inspect it with:
+
+```bash
+tail -f runs/qwen_cache_smoke/compressions/rae_lstm_training.jsonl
 ```

@@ -153,6 +153,11 @@ def cmd_compress(args: argparse.Namespace) -> int:
         latent_dim=args.latent_dim,
         seed=args.seed,
         epochs=args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        chunk_dim=args.chunk_dim,
+        hidden_dim=args.hidden_dim,
+        log_every=args.log_every,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -396,6 +401,11 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--latent-dim", type=int, default=64)
     compress.add_argument("--seed", type=int, default=0)
     compress.add_argument("--epochs", type=int, default=1)
+    compress.add_argument("--lr", type=float, default=1e-3)
+    compress.add_argument("--weight-decay", type=float, default=1e-2)
+    compress.add_argument("--chunk-dim", type=int, default=4096, help="Chunk size for sequence codecs such as rae_lstm.")
+    compress.add_argument("--hidden-dim", type=int, default=128, help="Hidden size for sequence codecs such as rae_lstm.")
+    compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")

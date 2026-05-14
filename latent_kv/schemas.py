@@ -28,6 +28,14 @@ class CacheMetadata:
     selected_heads: list[int] | None
     token_count: int
     cache_path: str
+    benchmark: str | None = None
+    task_id: str | None = None
+    prompt_baseline: str | None = None
+    prompt_protocol: str | None = None
+    target: str | None = None
+    parsed_answer: str | None = None
+    correct: bool | None = None
+    generation_error: str | None = None
 
 
 @dataclass

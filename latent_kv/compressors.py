@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -19,6 +21,24 @@ class CacheMatrix:
     paths: list[str]
     lengths: list[int]
     shapes: list[Any]
+    labels: list[dict[str, Any]]
+
+
+def _record_label(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata") or {}
+    return {
+        "benchmark": record.get("benchmark"),
+        "task_id": record.get("task_id"),
+        "attempt_id": record.get("attempt_id"),
+        "correct": bool(record.get("correct")),
+        "target": record.get("target"),
+        "parsed_answer": record.get("parsed_answer"),
+        "prompt_baseline": metadata.get("prompt_baseline"),
+        "prompt_protocol": metadata.get("prompt_protocol"),
+        "source": metadata.get("source"),
+        "generation_error": metadata.get("generation_error"),
+        "cache_path": record.get("cache_path"),
+    }
 
 
 def load_cache_matrix(run_dir: Path) -> CacheMatrix:
@@ -26,6 +46,7 @@ def load_cache_matrix(run_dir: Path) -> CacheMatrix:
     vectors = []
     paths = []
     shapes = []
+    labels = []
     for record in records:
         cache_path = record.get("cache_path")
         if not cache_path:
@@ -35,6 +56,7 @@ def load_cache_matrix(run_dir: Path) -> CacheMatrix:
         vectors.append(flatten_cache(cache))
         paths.append(cache_path)
         shapes.append(bundle.get("shapes") or cache_shapes(cache))
+        labels.append(_record_label(record))
     if not vectors:
         raise ValueError(f"No cache vectors found under {run_dir}")
     max_len = max(vector.numel() for vector in vectors)
@@ -50,11 +72,20 @@ def load_cache_matrix(run_dir: Path) -> CacheMatrix:
         paths=paths,
         lengths=lengths,
         shapes=shapes,
+        labels=labels,
     )
 
 
 def reconstruction_mse(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
     return float(torch.mean((original.float() - reconstructed.float()) ** 2).item())
+
+
+def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 @dataclass
@@ -182,19 +213,37 @@ def train_autoencoder(
     epochs: int = 1,
     lr: float = 1e-3,
     seed: int = 0,
-) -> tuple[AutoEncoder, float]:
+    progress_path: Path | None = None,
+    log_every: int = 1,
+) -> tuple[AutoEncoder, float, list[dict[str, Any]]]:
     torch.manual_seed(seed)
     model = AutoEncoder(input_dim=x.shape[1], latent_dim=latent_dim)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    for _ in range(epochs):
+    history: list[dict[str, Any]] = []
+    start = time.perf_counter()
+    for epoch in range(1, epochs + 1):
         opt.zero_grad(set_to_none=True)
         reconstructed = model(x)
         loss = torch.mean((reconstructed - x) ** 2)
         loss.backward()
         opt.step()
+        event = {
+            "epoch": epoch,
+            "epochs": epochs,
+            "method": "autoencoder",
+            "loss": float(loss.detach().item()),
+            "elapsed_s": time.perf_counter() - start,
+        }
+        history.append(event)
+        if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
+            _append_training_event(progress_path, event)
+            print(
+                f"[autoencoder epoch {epoch}/{epochs}] loss={event['loss']:.6g} elapsed={event['elapsed_s']:.1f}s",
+                flush=True,
+            )
     with torch.no_grad():
         mse = reconstruction_mse(x, model(x))
-    return model, mse
+    return model, mse, history
 
 
 def train_lstm_seq2seq_autoencoder(
@@ -204,9 +253,11 @@ def train_lstm_seq2seq_autoencoder(
     lr: float = 1e-3,
     seed: int = 0,
     weight_decay: float = 1e-2,
-    chunk_dim: int = 128,
+    chunk_dim: int = 4096,
     hidden_dim: int = 128,
-) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any]]:
+    progress_path: Path | None = None,
+    log_every: int = 1,
+) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
     mean = x.mean(dim=0, keepdim=True)
     std = x.std(dim=0, keepdim=True, unbiased=False).clamp_min(1e-6)
@@ -218,12 +269,33 @@ def train_lstm_seq2seq_autoencoder(
         hidden_dim=hidden_dim,
     )
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    for _ in range(epochs):
+    history: list[dict[str, Any]] = []
+    start = time.perf_counter()
+    for epoch in range(1, epochs + 1):
         opt.zero_grad(set_to_none=True)
         reconstructed = model(normalized)
         loss = torch.mean((reconstructed - normalized) ** 2)
         loss.backward()
         opt.step()
+        event = {
+            "chunk_dim": model.chunk_dim,
+            "elapsed_s": time.perf_counter() - start,
+            "epoch": epoch,
+            "epochs": epochs,
+            "hidden_dim": model.hidden_dim,
+            "loss": float(loss.detach().item()),
+            "method": "rae_lstm",
+            "seq_len": model.seq_len,
+            "weight_decay": weight_decay,
+        }
+        history.append(event)
+        if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
+            _append_training_event(progress_path, event)
+            print(
+                f"[rae_lstm epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
+                f"seq_len={model.seq_len} elapsed={event['elapsed_s']:.1f}s",
+                flush=True,
+            )
     with torch.no_grad():
         z = model.encode(normalized).detach()
         reconstructed = (model.decode(z).detach() * std) + mean
@@ -236,7 +308,7 @@ def train_lstm_seq2seq_autoencoder(
         "seq_len": model.seq_len,
         "weight_decay": weight_decay,
     }
-    return model, reconstructed, mse, stats
+    return model, reconstructed, mse, stats, history
 
 
 def nearest_neighbor_reconstruct(x: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -255,6 +327,11 @@ def run_compression(
     latent_dim: int,
     seed: int = 0,
     epochs: int = 1,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-2,
+    chunk_dim: int = 4096,
+    hidden_dim: int = 128,
+    log_every: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -262,6 +339,9 @@ def run_compression(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     method = method.lower()
 
+    progress_path = artifact_dir / f"{method}_training.jsonl"
+    if progress_path.exists():
+        progress_path.write_text("", encoding="utf-8")
     artifact: dict[str, Any] = {"method": method, "latent_dim": latent_dim}
     if method in {"random", "random_projection"}:
         compressor = RandomProjectionCompressor(x.shape[1], latent_dim, seed=seed)
@@ -274,16 +354,30 @@ def run_compression(
         reconstructed = compressor.decode(z)
         artifact.update({"mean": compressor.mean, "components": compressor.components})
     elif method in {"ae", "autoencoder"}:
-        compressor, mse = train_autoencoder(x, latent_dim, epochs=epochs, seed=seed)
-        z = compressor.encode(x).detach()
-        reconstructed = compressor.decode(z).detach()
-        artifact.update({"state_dict": compressor.state_dict(), "train_mse": mse})
-    elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
-        compressor, reconstructed, mse, stats = train_lstm_seq2seq_autoencoder(
+        compressor, mse, history = train_autoencoder(
             x,
             latent_dim,
             epochs=epochs,
+            lr=lr,
             seed=seed,
+            progress_path=progress_path,
+            log_every=log_every,
+        )
+        z = compressor.encode(x).detach()
+        reconstructed = compressor.decode(z).detach()
+        artifact.update({"state_dict": compressor.state_dict(), "train_mse": mse, "training_history": history})
+    elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
+        compressor, reconstructed, mse, stats, history = train_lstm_seq2seq_autoencoder(
+            x,
+            latent_dim,
+            epochs=epochs,
+            lr=lr,
+            seed=seed,
+            weight_decay=weight_decay,
+            chunk_dim=chunk_dim,
+            hidden_dim=hidden_dim,
+            progress_path=progress_path,
+            log_every=log_every,
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
@@ -296,6 +390,7 @@ def run_compression(
                 "normalization_mean": mean,
                 "normalization_std": std,
                 "codec_kind": "lstm_seq2seq_rae",
+                "training_history": history,
                 **stats,
             }
         )
@@ -314,6 +409,7 @@ def run_compression(
             "latents": z.detach().cpu(),
             "reconstructed": reconstructed.detach().cpu(),
             "cache_paths": cache_matrix.paths,
+            "source_labels": cache_matrix.labels,
             "lengths": cache_matrix.lengths,
             "shapes": cache_matrix.shapes,
             "method": method,
@@ -327,6 +423,7 @@ def run_compression(
                 "one_latent_per_cache": True,
                 "decodes_to": "flattened_cache_vector",
             },
+            "training_log_path": str(progress_path) if progress_path.exists() else None,
         },
         latent_path,
     )
@@ -339,7 +436,11 @@ def run_compression(
         reconstruction_mse=mse,
         latent_path=str(latent_path),
         artifact_path=str(artifact_path),
-        metrics={"input_dim": float(x.shape[1]), "point_codec": 1.0},
+        metrics={
+            "input_dim": float(x.shape[1]),
+            "point_codec": 1.0,
+            "training_log_written": 1.0 if progress_path.exists() else 0.0,
+        },
     )
     write_json(artifact_dir / f"{method}_result.json", result.__dict__)
     return result

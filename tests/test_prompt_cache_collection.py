@@ -62,6 +62,9 @@ def test_prompt_cache_collection_writes_records_and_bundles(tmp_path: Path, monk
     assert rows[0]["metadata"]["prompt_protocol"] == "zero_shot_standard"
     bundle = load_cache_bundle(Path(rows[0]["cache_path"]))
     assert bundle["metadata"]["selected_layers"] == [0, 1]
+    assert bundle["metadata"]["task_id"] == "hanoi_0000_2d"
+    assert bundle["metadata"]["prompt_protocol"] == "zero_shot_standard"
+    assert bundle["metadata"]["correct"] is True
     assert bundle["input_ids"].shape == (1, 3)
     assert payload["extra"]["prompt_cache_standard_local_model"] == "fake-model"
     assert metrics["baselines"][0]["baseline"] == "prompt_cache_standard"

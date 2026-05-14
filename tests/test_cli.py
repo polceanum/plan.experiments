@@ -48,3 +48,15 @@ def test_validate_codec_help_lists_method(capsys):
     assert "rae_lstm" in out
     assert "retrieval" in out
 
+
+def test_compress_help_lists_lstm_hyperparameters(capsys):
+    try:
+        main(["compress", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--chunk-dim" in out
+    assert "--hidden-dim" in out
+    assert "--weight-decay" in out
+    assert "--log-every" in out
+

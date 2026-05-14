@@ -133,6 +133,14 @@ def run_prompt_cache_collection(
                 selected_heads=None,
                 token_count=prompt_tokens,
                 cache_path=str(cache_path),
+                benchmark=example.benchmark,
+                task_id=example.task_id,
+                prompt_baseline=baseline,
+                prompt_protocol=protocol_metadata["protocol_name"],
+                target=example.answer,
+                parsed_answer=parsed,
+                correct=bool(correct) and error is None,
+                generation_error=error,
             )
             save_cache_bundle(
                 cache_path,
