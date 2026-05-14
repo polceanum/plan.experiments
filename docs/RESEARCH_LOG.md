@@ -185,3 +185,23 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Resume or rerun the full tier for CoT and retry_reflection, preferably with unbuffered Python/stdout handling if live terminal logs are important.
+
+## 2026-05-14 - Qwen full-tier standard and CoT baselines completed
+
+### Worked
+
+- Completed the full 1319-example cached GSM8K standard and CoT baselines for local Qwen2.5-0.5B-Instruct with streamed JSONL artifacts.
+- Standard reached 465/1319 correct, accuracy 0.353, with no generation errors.
+- Zero-shot CoT reached 498/1319 correct, accuracy 0.378, with no generation errors.
+- The resumed CoT-only run stopped after CoT and did not start retry_reflection.
+- check-targets recorded the expected protocol_mismatch: decoding and split match the tracked CoT target, but model and prompt differ from PaLM 540B eight-shot CoT.
+
+### Did Not Work / Caveats
+
+- This is a local Qwen zero-shot CoT baseline, not a reported PaLM 540B reproduction.
+- retry_reflection remains intentionally deferred for a later overnight run.
+
+### Left To Do
+
+- Start latent-KV method experiments against the completed standard/CoT local baseline floor.
+- Run retry_reflection later with --resume when convenient, ideally overnight or after checking laptop load.
