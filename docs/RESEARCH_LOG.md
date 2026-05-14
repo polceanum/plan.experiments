@@ -239,3 +239,17 @@ short and concrete so they can be updated after every run.
 
 - Add token-level replay fidelity diagnostics comparing original generated IDs against replay IDs.
 - Improve decoded-cache quality before scaling behavioural claims; keep retrieval as the nearest-neighbour sanity baseline.
+
+## 2026-05-14 - chunk-projected RAE reconstruction smoke
+
+### Worked
+
+- Added masked variable-length loss, latent-conditioned positional decoder inputs, final+mean encoder summary, and a chunk projection layer before the LSTM. Full tests passed under conda orpheus. On runs/qwen_cache_smoke_10, structural validation stayed 10/10 and mean validation MSE improved from the prior best 27.23005 to 27.08518.
+
+### Did Not Work / Caveats
+
+- The improvement did not yet translate into GSM8K behavioural replay: rae_lstm remained 0/10 while original_cache and source prompt-cache stay 2/10. This is still a local Qwen 10-example implementation check, not a reported-protocol reproduction.
+
+### Left To Do
+
+- Try more expressive one-point decoders or loss terms aligned with replay-sensitive KV structure, such as layer/head-aware chunking, per-layer normalization, residual reconstruction from retrieval/mean cache, or token-position-aware objectives before rerunning behavioural replay.

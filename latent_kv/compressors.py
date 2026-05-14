@@ -168,16 +168,23 @@ class ChunkedLSTMAutoEncoder(nn.Module):
         self.seq_len = self.padded_dim // self.chunk_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.chunk_to_hidden = nn.Sequential(
+            nn.Linear(self.chunk_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
         self.encoder = nn.LSTM(
-            input_size=self.chunk_dim,
+            input_size=hidden_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
         )
-        self.to_latent = nn.Linear(hidden_dim, latent_dim)
+        self.to_latent = nn.Linear(hidden_dim * 2, latent_dim)
         self.latent_to_hidden = nn.Linear(latent_dim, num_layers * hidden_dim)
+        self.latent_to_decoder_input = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_positions = nn.Parameter(torch.randn(self.seq_len, hidden_dim) * 0.02)
         self.decoder = nn.LSTM(
-            input_size=self.chunk_dim,
+            input_size=hidden_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
@@ -191,14 +198,17 @@ class ChunkedLSTMAutoEncoder(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         sequence = self._to_sequence(x)
-        _, (hidden, _) = self.encoder(sequence)
-        return self.to_latent(hidden[-1])
+        projected = self.chunk_to_hidden(sequence)
+        encoded, (hidden, _) = self.encoder(projected)
+        summary = torch.cat([hidden[-1], encoded.mean(dim=1)], dim=-1)
+        return self.to_latent(summary)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         batch = z.shape[0]
         hidden = self.latent_to_hidden(z).reshape(self.num_layers, batch, self.hidden_dim).contiguous()
         cell = torch.zeros_like(hidden)
-        decoder_input = torch.zeros(batch, self.seq_len, self.chunk_dim, device=z.device, dtype=z.dtype)
+        decoder_step = self.latent_to_decoder_input(z).unsqueeze(1)
+        decoder_input = decoder_step + self.decoder_positions.unsqueeze(0)
         decoded, _ = self.decoder(decoder_input, (hidden, cell))
         chunks = self.output(decoded).reshape(batch, self.padded_dim)
         return chunks[:, : self.input_dim]
@@ -248,6 +258,7 @@ def train_autoencoder(
 
 def train_lstm_seq2seq_autoencoder(
     x: torch.Tensor,
+    lengths: list[int],
     latent_dim: int,
     epochs: int = 1,
     lr: float = 1e-3,
@@ -259,9 +270,18 @@ def train_lstm_seq2seq_autoencoder(
     log_every: int = 1,
 ) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
-    mean = x.mean(dim=0, keepdim=True)
-    std = x.std(dim=0, keepdim=True, unbiased=False).clamp_min(1e-6)
+    valid_mask = torch.zeros_like(x, dtype=torch.bool)
+    for row_idx, length in enumerate(lengths):
+        valid_mask[row_idx, : int(length)] = True
+    counts = valid_mask.sum(dim=0, keepdim=True).clamp_min(1).float()
+    masked_x = x.masked_fill(~valid_mask, 0.0)
+    mean = masked_x.sum(dim=0, keepdim=True) / counts
+    variance = (((x - mean).masked_fill(~valid_mask, 0.0)) ** 2).sum(dim=0, keepdim=True) / counts
+    std = variance.sqrt().clamp_min(1e-6)
     normalized = (x - mean) / std
+    normalized = normalized.masked_fill(~valid_mask, 0.0)
+    loss_mask = valid_mask.float()
+    loss_denominator = loss_mask.sum().clamp_min(1.0)
     model = ChunkedLSTMAutoEncoder(
         input_dim=x.shape[1],
         latent_dim=latent_dim,
@@ -274,7 +294,7 @@ def train_lstm_seq2seq_autoencoder(
     for epoch in range(1, epochs + 1):
         opt.zero_grad(set_to_none=True)
         reconstructed = model(normalized)
-        loss = torch.mean((reconstructed - normalized) ** 2)
+        loss = (((reconstructed - normalized) ** 2) * loss_mask).sum() / loss_denominator
         loss.backward()
         opt.step()
         event = {
@@ -285,7 +305,9 @@ def train_lstm_seq2seq_autoencoder(
             "hidden_dim": model.hidden_dim,
             "loss": float(loss.detach().item()),
             "method": "rae_lstm",
+            "masked_loss": True,
             "seq_len": model.seq_len,
+            "valid_values": int(loss_mask.sum().item()),
             "weight_decay": weight_decay,
         }
         history.append(event)
@@ -307,6 +329,10 @@ def train_lstm_seq2seq_autoencoder(
         "hidden_dim": model.hidden_dim,
         "seq_len": model.seq_len,
         "weight_decay": weight_decay,
+        "masked_loss": True,
+        "decoder_conditioning": "latent_repeated_input_plus_learned_position",
+        "latent_summary": "last_hidden_plus_mean_encoded",
+        "chunk_projection": "linear_layernorm_gelu",
     }
     return model, reconstructed, mse, stats, history
 
@@ -369,6 +395,7 @@ def run_compression(
     elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
         compressor, reconstructed, mse, stats, history = train_lstm_seq2seq_autoencoder(
             x,
+            cache_matrix.lengths,
             latent_dim,
             epochs=epochs,
             lr=lr,
