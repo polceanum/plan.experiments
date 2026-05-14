@@ -21,10 +21,12 @@ from .metrics import evaluate_run
 from .prompt_cache_collection import run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
+from .replay_diagnostics import score_replay_fidelity
 from .research_log import append_research_log
 from .schemas import TrajectoryRecord, append_jsonl, read_json, read_jsonl, write_json
 from .target_checks import check_targets
 from .tot_baseline import run_tot_baseline
+from .training_diagnostics import summarize_training_curve
 
 
 SMOKE_MODEL = "EleutherAI/pythia-70m-deduped"
@@ -352,6 +354,28 @@ def cmd_validate_codec(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay_fidelity(args: argparse.Namespace) -> int:
+    import json
+
+    summary = score_replay_fidelity(
+        run_dir=Path(args.run),
+        method=args.method,
+        model_id=args.model_id,
+        device_name=args.device,
+        limit=args.limit,
+    )
+    print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_training_curve(args: argparse.Namespace) -> int:
+    import json
+
+    summary = summarize_training_curve(Path(args.run), args.method)
+    print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_inject(args: argparse.Namespace) -> int:
     bundle_path = Path(args.cache)
     summary = validate_bundle_for_injection(bundle_path)
@@ -460,6 +484,25 @@ def build_parser() -> argparse.ArgumentParser:
     validate_codec.add_argument("--run", required=True)
     validate_codec.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
     validate_codec.set_defaults(func=cmd_validate_codec)
+
+    replay_fidelity = sub.add_parser(
+        "replay-fidelity",
+        help="Compare original vs reconstructed-cache logits after the first replay step",
+    )
+    replay_fidelity.add_argument("--run", required=True)
+    replay_fidelity.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    replay_fidelity.add_argument("--model-id", default=None)
+    replay_fidelity.add_argument("--device", default="auto")
+    replay_fidelity.add_argument("--limit", type=int, default=None)
+    replay_fidelity.set_defaults(func=cmd_replay_fidelity)
+
+    training_curve = sub.add_parser(
+        "training-curve",
+        help="Summarize learned-codec training loss dynamics",
+    )
+    training_curve.add_argument("--run", required=True)
+    training_curve.add_argument("--method", required=True, choices=["autoencoder", "rae_lstm"])
+    training_curve.set_defaults(func=cmd_training_curve)
 
     prompt = sub.add_parser("prompt-baseline", help="Run local prompt baselines without remote APIs")
     prompt.add_argument("--run", required=True)

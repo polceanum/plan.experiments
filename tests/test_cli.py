@@ -49,6 +49,28 @@ def test_validate_codec_help_lists_method(capsys):
     assert "retrieval" in out
 
 
+def test_replay_fidelity_help_lists_method(capsys):
+    try:
+        main(["replay-fidelity", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--method" in out
+    assert "--limit" in out
+    assert "rae_lstm" in out
+
+
+def test_training_curve_help_lists_method(capsys):
+    try:
+        main(["training-curve", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--method" in out
+    assert "rae_lstm" in out
+    assert "autoencoder" in out
+
+
 def test_compress_help_lists_lstm_hyperparameters(capsys):
     try:
         main(["compress", "--help"])

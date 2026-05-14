@@ -267,3 +267,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Add replay-sensitive diagnostics and losses: token-level replay agreement, first-token KL/logit similarity from reconstructed caches, layer/head-wise MSE, and optionally train against a residual or layer-aware representation before another behaviour run.
+
+## 2026-05-14 - replay-fidelity and training-curve diagnostics
+
+### Worked
+
+- Added replay-fidelity diagnostics that compare original vs reconstructed-cache logits after the first replay token, plus training-curve summaries for learned codec logs. Tests passed: 52 total. On runs/qwen_cache_smoke_10, rae_lstm replay-fidelity showed mean logit cosine 0.30649, mean logit MSE 18.61020, KL(original||reconstructed) 15.90055, and top-1 match rate 0/10; retrieval was worse with cosine 0.03710 and MSE 24.07538. The rae_lstm training curve was monotonic nonincreasing and classified as accelerating_decrease: loss 0.99270 -> 0.93307 across sampled epochs 1..80, with late mean delta -0.02690 versus early -0.00292.
+
+### Did Not Work / Caveats
+
+- Lower reconstruction MSE still does not preserve the first cache-dependent next-token distribution; this explains why behavioural replay remains 0/10 despite structurally valid reconstructed caches. The current training log is sparse because log_every was 20, so curve-shape diagnostics are useful but coarse.
+
+### Left To Do
+
+- Run future learned-codec experiments with denser log_every for curve inspection; add logit/KL-sensitive training objectives or per-layer/head diagnostics before relying on MSE as the main reconstruction signal.
