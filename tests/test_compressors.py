@@ -5,7 +5,7 @@ import torch
 from latent_kv.cache import CacheTuple, save_cache_bundle
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
-from latent_kv.compressors import run_compression
+from latent_kv.compressors import ChunkedLSTMAutoEncoder, run_compression
 from latent_kv.schemas import CacheMetadata, TrajectoryRecord, append_jsonl
 
 
@@ -103,3 +103,27 @@ def test_cache_validation_catches_shape_mismatch(tmp_path: Path):
     assert result.valid is False
     assert result.shape_match is False
     assert any("key_shape" in error for error in result.errors)
+
+
+def test_chunked_lstm_autoencoder_maps_sequence_to_one_point():
+    model = ChunkedLSTMAutoEncoder(input_dim=10, latent_dim=3, chunk_dim=4, hidden_dim=5)
+    x = torch.randn(2, 10)
+
+    z = model.encode(x)
+    decoded = model.decode(z)
+
+    assert z.shape == (2, 3)
+    assert decoded.shape == x.shape
+
+
+def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
+    _write_run(tmp_path)
+    result = run_compression(tmp_path, method="rae_lstm", latent_dim=3, seed=0, epochs=1)
+    validation = validate_reconstructed_artifact(tmp_path, "rae_lstm")
+    payload = torch.load(result.latent_path, map_location="cpu")
+
+    assert payload["latents"].shape == (2, 3)
+    assert payload["codec_contract"]["input_representation"] == "chunked_flattened_full_cache"
+    assert validation.records == 2
+    assert validation.one_point_per_cache is True
+    assert validation.valid_caches == 2

@@ -120,6 +120,62 @@ class AutoEncoder(nn.Module):
         return self.decode(self.encode(x))
 
 
+class ChunkedLSTMAutoEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        latent_dim: int,
+        chunk_dim: int = 128,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+    ) -> None:
+        super().__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.chunk_dim = max(1, min(chunk_dim, max(1, input_dim)))
+        self.padded_dim = ((input_dim + self.chunk_dim - 1) // self.chunk_dim) * self.chunk_dim
+        self.seq_len = self.padded_dim // self.chunk_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.encoder = nn.LSTM(
+            input_size=self.chunk_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+        self.to_latent = nn.Linear(hidden_dim, latent_dim)
+        self.latent_to_hidden = nn.Linear(latent_dim, num_layers * hidden_dim)
+        self.decoder = nn.LSTM(
+            input_size=self.chunk_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+        self.output = nn.Linear(hidden_dim, self.chunk_dim)
+
+    def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] < self.padded_dim:
+            x = torch.nn.functional.pad(x, (0, self.padded_dim - x.shape[1]))
+        return x[:, : self.padded_dim].reshape(x.shape[0], self.seq_len, self.chunk_dim)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        sequence = self._to_sequence(x)
+        _, (hidden, _) = self.encoder(sequence)
+        return self.to_latent(hidden[-1])
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        batch = z.shape[0]
+        hidden = self.latent_to_hidden(z).reshape(self.num_layers, batch, self.hidden_dim).contiguous()
+        cell = torch.zeros_like(hidden)
+        decoder_input = torch.zeros(batch, self.seq_len, self.chunk_dim, device=z.device, dtype=z.dtype)
+        decoded, _ = self.decoder(decoder_input, (hidden, cell))
+        chunks = self.output(decoded).reshape(batch, self.padded_dim)
+        return chunks[:, : self.input_dim]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.decode(self.encode(x))
+
+
 def train_autoencoder(
     x: torch.Tensor,
     latent_dim: int,
@@ -139,6 +195,48 @@ def train_autoencoder(
     with torch.no_grad():
         mse = reconstruction_mse(x, model(x))
     return model, mse
+
+
+def train_lstm_seq2seq_autoencoder(
+    x: torch.Tensor,
+    latent_dim: int,
+    epochs: int = 1,
+    lr: float = 1e-3,
+    seed: int = 0,
+    weight_decay: float = 1e-2,
+    chunk_dim: int = 128,
+    hidden_dim: int = 128,
+) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any]]:
+    torch.manual_seed(seed)
+    mean = x.mean(dim=0, keepdim=True)
+    std = x.std(dim=0, keepdim=True, unbiased=False).clamp_min(1e-6)
+    normalized = (x - mean) / std
+    model = ChunkedLSTMAutoEncoder(
+        input_dim=x.shape[1],
+        latent_dim=latent_dim,
+        chunk_dim=chunk_dim,
+        hidden_dim=hidden_dim,
+    )
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    for _ in range(epochs):
+        opt.zero_grad(set_to_none=True)
+        reconstructed = model(normalized)
+        loss = torch.mean((reconstructed - normalized) ** 2)
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        z = model.encode(normalized).detach()
+        reconstructed = (model.decode(z).detach() * std) + mean
+        mse = reconstruction_mse(x, reconstructed)
+    stats = {
+        "normalization_mean": mean.detach().cpu(),
+        "normalization_std": std.detach().cpu(),
+        "chunk_dim": model.chunk_dim,
+        "hidden_dim": model.hidden_dim,
+        "seq_len": model.seq_len,
+        "weight_decay": weight_decay,
+    }
+    return model, reconstructed, mse, stats
 
 
 def nearest_neighbor_reconstruct(x: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -180,6 +278,27 @@ def run_compression(
         z = compressor.encode(x).detach()
         reconstructed = compressor.decode(z).detach()
         artifact.update({"state_dict": compressor.state_dict(), "train_mse": mse})
+    elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
+        compressor, reconstructed, mse, stats = train_lstm_seq2seq_autoencoder(
+            x,
+            latent_dim,
+            epochs=epochs,
+            seed=seed,
+        )
+        mean = stats.pop("normalization_mean")
+        std = stats.pop("normalization_std")
+        with torch.no_grad():
+            z = compressor.encode((x - mean) / std).detach()
+        artifact.update(
+            {
+                "state_dict": compressor.state_dict(),
+                "train_mse": mse,
+                "normalization_mean": mean,
+                "normalization_std": std,
+                "codec_kind": "lstm_seq2seq_rae",
+                **stats,
+            }
+        )
     elif method in {"retrieval", "nearest_neighbor_cache"}:
         z = x
         reconstructed, _ = nearest_neighbor_reconstruct(x)
@@ -202,7 +321,9 @@ def run_compression(
             "codec_contract": {
                 "point_codec": True,
                 "geometry_only": False,
-                "input_representation": "flattened_full_cache",
+                "input_representation": "chunked_flattened_full_cache"
+                if method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}
+                else "flattened_full_cache",
                 "one_latent_per_cache": True,
                 "decodes_to": "flattened_cache_vector",
             },

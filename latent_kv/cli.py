@@ -212,7 +212,7 @@ def cmd_behavior(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     baselines = args.baseline
     if baselines == ["all"]:
-        baselines = ["original_cache", "random", "pca_svd", "autoencoder", "retrieval"]
+        baselines = ["original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"]
     payload = None
     for baseline in baselines:
         payload = run_cache_behavioral_baseline(
@@ -392,7 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compress = sub.add_parser("compress", help="Run a compression baseline on saved caches")
     compress.add_argument("--run", required=True)
-    compress.add_argument("--method", default="random", choices=["random", "pca_svd", "autoencoder", "retrieval"])
+    compress.add_argument("--method", default="random", choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
     compress.add_argument("--latent-dim", type=int, default=64)
     compress.add_argument("--seed", type=int, default=0)
     compress.add_argument("--epochs", type=int, default=1)
@@ -411,7 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--baseline", default="no_cache")
     evaluate.add_argument(
         "--behavioral-baseline",
-        choices=["original_cache", "random", "pca_svd", "autoencoder", "retrieval"],
+        choices=["original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"],
         default=None,
         help="Replay a local cache baseline through the local model and score task behaviour.",
     )
@@ -426,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline",
         nargs="+",
         default=["original_cache"],
-        choices=["all", "original_cache", "random", "pca_svd", "autoencoder", "retrieval"],
+        choices=["all", "original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"],
     )
     behavior.add_argument("--model-id", default=None)
     behavior.add_argument("--device", default="auto")
@@ -438,7 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate that compression latents decode to replay-compatible cache shapes",
     )
     validate_codec.add_argument("--run", required=True)
-    validate_codec.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "retrieval"])
+    validate_codec.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
     validate_codec.set_defaults(func=cmd_validate_codec)
 
     prompt = sub.add_parser("prompt-baseline", help="Run local prompt baselines without remote APIs")

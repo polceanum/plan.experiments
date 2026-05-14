@@ -100,6 +100,7 @@ def run_cache_behavioral_baseline(
     - pca_svd
     - autoencoder
     - retrieval
+    - rae_lstm
     """
 
     records = [row for row in read_jsonl(run_dir / "records.jsonl") if row.get("cache_path")]
@@ -107,7 +108,7 @@ def run_cache_behavioral_baseline(
         raise ValueError(f"No cache-backed records found in {run_dir}")
 
     baseline = baseline.lower()
-    reconstructed_methods = {"random", "pca_svd", "autoencoder", "retrieval"}
+    reconstructed_methods = {"random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"}
     if baseline not in reconstructed_methods | {"original_cache"}:
         raise ValueError(f"Unsupported behavioural baseline: {baseline}")
 

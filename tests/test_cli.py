@@ -45,5 +45,6 @@ def test_validate_codec_help_lists_method(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--method" in out
+    assert "rae_lstm" in out
     assert "retrieval" in out
 

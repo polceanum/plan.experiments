@@ -168,3 +168,17 @@ conda run -n orpheus python -m latent_kv validate-codec \
   --run runs/qwen_cache_smoke \
   --method retrieval
 ```
+
+The first learned point codec is `rae_lstm`: a chunked LSTM seq2seq
+autoencoder. It treats a flattened full-cache vector as a cache-derived sequence
+of chunks, encodes the whole sequence into one fixed-size latent point, and
+decodes that point back to a flattened cache vector that can be unpacked and
+validated with the same `validate-codec` path.
+
+```bash
+conda run -n orpheus python -m latent_kv compress \
+  --run runs/qwen_cache_smoke \
+  --method rae_lstm \
+  --latent-dim 128 \
+  --epochs 5
+```
