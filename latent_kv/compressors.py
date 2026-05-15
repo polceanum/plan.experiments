@@ -496,8 +496,8 @@ def train_temporal_lstm_autoencoder(
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
     training_device = choose_device(llm_device_name) if llm_loss_weight > 0 else torch.device("cpu")
-    sequence = _temporal_matrix(x, aligned_shapes).to(training_device)
-    token_mask = _temporal_token_mask(shapes, aligned_shapes).to(training_device)
+    sequence = _temporal_matrix(x, aligned_shapes)
+    token_mask = _temporal_token_mask(shapes, aligned_shapes)
     feature_mask = token_mask.unsqueeze(-1).float()
     denominator = (feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
     counts = feature_mask.sum(dim=(0, 1), keepdim=True).clamp_min(1.0)
@@ -506,6 +506,8 @@ def train_temporal_lstm_autoencoder(
     variance = (((sequence - mean) * feature_mask) ** 2).sum(dim=(0, 1), keepdim=True) / counts
     std = variance.sqrt().clamp_min(1e-6)
     normalized = ((sequence - mean) / std) * feature_mask
+    mean_device = mean.to(training_device)
+    std_device = std.to(training_device)
     model = TemporalLSTMAutoEncoder(
         token_dim=sequence.shape[-1],
         max_tokens=sequence.shape[1],
@@ -531,12 +533,27 @@ def train_temporal_lstm_autoencoder(
             )
         for parameter in llm.parameters():
             parameter.requires_grad_(False)
-        llm_bundles = [load_cache_bundle(Path(path)) for path in cache_paths]
         with torch.no_grad():
-            target_transition_logits = [
-                [logits.detach() for logits in _prompt_state_transition_logits(bundle, cache_to_device(bundle["cache"], training_device), llm, training_device, llm_steps)]
-                for bundle in llm_bundles
-            ]
+            for path in cache_paths:
+                bundle = load_cache_bundle(Path(path))
+                target_transition_logits.append(
+                    [
+                        logits.detach().cpu()
+                        for logits in _prompt_state_transition_logits(
+                            bundle,
+                            cache_to_device(bundle["cache"], training_device),
+                            llm,
+                            training_device,
+                            llm_steps,
+                        )
+                    ]
+                )
+                llm_bundles.append(
+                    {
+                        "input_ids": bundle.get("input_ids"),
+                        "attention_mask": bundle.get("attention_mask"),
+                    }
+                )
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
@@ -551,16 +568,16 @@ def train_temporal_lstm_autoencoder(
         llm_loss_batches = 0
         for batch_start in range(0, int(normalized.shape[0]), batch_size):
             batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
-            batch_normalized = normalized[batch_start:batch_stop]
-            batch_token_mask = token_mask[batch_start:batch_stop]
-            batch_feature_mask = feature_mask[batch_start:batch_stop]
+            batch_normalized = normalized[batch_start:batch_stop].to(training_device)
+            batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
+            batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
             batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
             opt.zero_grad(set_to_none=True)
             reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
             reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
             llm_loss = reconstructed_norm.new_tensor(0.0)
             if llm is not None and llm_loss_weight > 0:
-                reconstructed_sequence = ((reconstructed_norm * std) + mean) * batch_feature_mask
+                reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
                 transition_losses = []
                 for local_idx, row in enumerate(reconstructed_sequence):
                     row_idx = batch_start + local_idx
@@ -575,7 +592,7 @@ def train_temporal_lstm_autoencoder(
                         llm_steps,
                     )
                     for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
-                        target_probs = torch.softmax(target.detach(), dim=-1)
+                        target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
                         predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
                         transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
                 if transition_losses:
@@ -650,10 +667,10 @@ def train_temporal_lstm_autoencoder(
         reconstructed_batches = []
         for batch_start in range(0, int(normalized.shape[0]), batch_size):
             batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
-            batch_token_mask = token_mask[batch_start:batch_stop]
-            batch_feature_mask = feature_mask[batch_start:batch_stop]
-            batch_z = model.encode(normalized[batch_start:batch_stop], token_mask=batch_token_mask).detach()
-            batch_reconstructed = (model.decode(batch_z).detach() * std) + mean
+            batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
+            batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
+            batch_z = model.encode(normalized[batch_start:batch_stop].to(training_device), token_mask=batch_token_mask).detach()
+            batch_reconstructed = (model.decode(batch_z).detach() * std_device) + mean_device
             latent_batches.append(batch_z.cpu())
             reconstructed_batches.append((batch_reconstructed * batch_feature_mask).cpu())
         z = torch.cat(latent_batches, dim=0)
