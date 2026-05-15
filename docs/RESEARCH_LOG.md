@@ -339,3 +339,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Drive the latent-only decoder toward much lower replay-critical error before testing other techniques; prioritize reconstruction fidelity and cache-sensitive diagnostics over local residual patchups.
+
+## 2026-05-15 - success-only CoT cache replay slice
+
+### Worked
+
+- Built runs/qwen_cache_cot_success20 from the first 20 correct CoT records in runs/baseline_tier_qwen_full/behavior/cot_records.jsonl; the full prompt-only CoT run had 498/1319 correct examples.
+- Original-cache replay on the success-only slice preserved 20/20 correct answers, confirming these cached prompts are a clean solved target set.
+- Rank-20 PCA/SVD latent-only reconstruction had near-zero reconstruction error and preserved 20/20 behavior, with 8-step replay top-1 match 1.0.
+
+### Did Not Work / Caveats
+
+- The current 512-dim LSTM RAE trained for 500 epochs with weight_decay=0.001 reached train MSE 0.20094 and replay-fidelity top-1 0.65, but free-running behavior was 0/20 on the solved slice.
+
+### Left To Do
+
+- Use this success-only slice as the primary reconstruction target while improving the learned latent-only decoder; more epochs alone are unlikely to close the gap unless architecture/loss fidelity improves.
