@@ -283,6 +283,29 @@ def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
     assert "normalization_mean" in latest
 
 
+def test_temporal_rae_can_train_in_mini_batches(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=2,
+        hidden_dim=5,
+        train_batch_size=1,
+        log_every=1,
+    )
+
+    payload = torch.load(result.latent_path, map_location="cpu")
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+
+    assert payload["latents"].shape == (2, 3)
+    assert artifact["train_batch_size"] == 1
+    assert training_rows[0]["train_batch_size"] == 1
+
+
 def test_temporal_rae_latents_use_masked_normalized_token_states(tmp_path: Path):
     _write_variable_length_run(tmp_path)
     result = run_compression(

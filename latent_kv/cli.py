@@ -166,6 +166,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         llm_steps=args.llm_steps,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
+        train_batch_size=args.train_batch_size,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -460,6 +461,7 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--llm-steps", type=int, default=1, help="Prompt-token state transitions per cache for optional frozen-LLM KL.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
+    compress.add_argument("--train-batch-size", type=int, default=0, help="Mini-batch size for rae_temporal training; 0 uses all records at once.")
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")

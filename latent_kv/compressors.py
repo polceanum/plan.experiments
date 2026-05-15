@@ -491,6 +491,7 @@ def train_temporal_lstm_autoencoder(
     log_every: int = 1,
     checkpoint_every: int = 0,
     checkpoint_dir: Path | None = None,
+    train_batch_size: int = 0,
 ) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
@@ -541,44 +542,64 @@ def train_temporal_lstm_autoencoder(
     start = time.perf_counter()
     if checkpoint_every > 0 and checkpoint_dir is not None:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    batch_size = int(train_batch_size) if train_batch_size and train_batch_size > 0 else int(normalized.shape[0])
+    batch_size = max(1, min(batch_size, int(normalized.shape[0])))
     for epoch in range(1, epochs + 1):
-        opt.zero_grad(set_to_none=True)
-        reconstructed_norm = model(normalized, token_mask=token_mask)
-        reconstruction_loss = (((reconstructed_norm - normalized) ** 2) * feature_mask).sum() / denominator
-        llm_loss = reconstructed_norm.new_tensor(0.0)
-        if llm is not None and llm_loss_weight > 0:
-            reconstructed_sequence = ((reconstructed_norm * std) + mean) * feature_mask
-            transition_losses = []
-            for row_idx, row in enumerate(reconstructed_sequence):
-                aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
-                compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
-                reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
-                predicted_logits = _prompt_state_transition_logits(
-                    llm_bundles[row_idx],
-                    reconstructed_cache,
-                    llm,
-                    training_device,
-                    llm_steps,
-                )
-                for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
-                    target_probs = torch.softmax(target.detach(), dim=-1)
-                    predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
-                    transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
-            if transition_losses:
-                llm_loss = torch.stack(transition_losses).mean()
-        loss = reconstruction_loss + (llm_loss_weight * llm_loss)
-        loss.backward()
-        opt.step()
+        reconstruction_numerator = 0.0
+        denominator_total = 0.0
+        llm_loss_total = 0.0
+        llm_loss_batches = 0
+        for batch_start in range(0, int(normalized.shape[0]), batch_size):
+            batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
+            batch_normalized = normalized[batch_start:batch_stop]
+            batch_token_mask = token_mask[batch_start:batch_stop]
+            batch_feature_mask = feature_mask[batch_start:batch_stop]
+            batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
+            opt.zero_grad(set_to_none=True)
+            reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
+            reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
+            llm_loss = reconstructed_norm.new_tensor(0.0)
+            if llm is not None and llm_loss_weight > 0:
+                reconstructed_sequence = ((reconstructed_norm * std) + mean) * batch_feature_mask
+                transition_losses = []
+                for local_idx, row in enumerate(reconstructed_sequence):
+                    row_idx = batch_start + local_idx
+                    aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
+                    compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
+                    reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
+                    predicted_logits = _prompt_state_transition_logits(
+                        llm_bundles[row_idx],
+                        reconstructed_cache,
+                        llm,
+                        training_device,
+                        llm_steps,
+                    )
+                    for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
+                        target_probs = torch.softmax(target.detach(), dim=-1)
+                        predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
+                        transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
+                if transition_losses:
+                    llm_loss = torch.stack(transition_losses).mean()
+            loss = reconstruction_loss + (llm_loss_weight * llm_loss)
+            loss.backward()
+            opt.step()
+            reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
+            denominator_total += float(batch_denominator.detach().item())
+            llm_loss_total += float(llm_loss.detach().item())
+            llm_loss_batches += 1
+        mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
+        mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
+        mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss)
         event = {
             "elapsed_s": time.perf_counter() - start,
             "epoch": epoch,
             "epochs": epochs,
             "hidden_dim": model.hidden_dim,
             "num_layers": model.num_layers,
-            "loss": float(loss.detach().item()),
+            "loss": mean_loss,
             "loss_components": {
-                "masked_temporal_reconstruction_mse": float(reconstruction_loss.detach().item()),
-                "frozen_llm_prompt_transition_kl": float(llm_loss.detach().item()),
+                "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
+                "frozen_llm_prompt_transition_kl": mean_llm_loss,
             },
             "method": "rae_temporal",
             "masked_loss": True,
@@ -591,6 +612,7 @@ def train_temporal_lstm_autoencoder(
             "llm_steps": int(llm_steps),
             "llm_gradients": llm is not None and llm_loss_weight > 0,
             "weight_decay": weight_decay,
+            "train_batch_size": batch_size,
         }
         history.append(event)
         if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
@@ -624,9 +646,18 @@ def train_temporal_lstm_autoencoder(
             torch.save(checkpoint, checkpoint_path)
             torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
     with torch.no_grad():
-        z = model.encode(normalized, token_mask=token_mask).detach()
-        reconstructed_sequence = (model.decode(z).detach() * std) + mean
-        reconstructed_sequence = reconstructed_sequence * feature_mask
+        latent_batches = []
+        reconstructed_batches = []
+        for batch_start in range(0, int(normalized.shape[0]), batch_size):
+            batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
+            batch_token_mask = token_mask[batch_start:batch_stop]
+            batch_feature_mask = feature_mask[batch_start:batch_stop]
+            batch_z = model.encode(normalized[batch_start:batch_stop], token_mask=batch_token_mask).detach()
+            batch_reconstructed = (model.decode(batch_z).detach() * std) + mean
+            latent_batches.append(batch_z.cpu())
+            reconstructed_batches.append((batch_reconstructed * batch_feature_mask).cpu())
+        z = torch.cat(latent_batches, dim=0)
+        reconstructed_sequence = torch.cat(reconstructed_batches, dim=0)
         reconstructed = _temporal_reconstructions_to_aligned(reconstructed_sequence.cpu(), aligned_shapes)
         mse = reconstruction_mse(x, reconstructed)
     model = model.cpu()
@@ -645,6 +676,7 @@ def train_temporal_lstm_autoencoder(
         "frozen_llm_prompt_transition_steps": int(llm_steps),
         "frozen_llm_gradients": llm_loss_weight > 0,
         "regularization": "adamw_weight_decay_only",
+        "train_batch_size": batch_size,
         "decoder_conditioning": "latent_repeated_input_plus_learned_temporal_position",
         "latent_summary": "last_hidden_plus_masked_mean_encoded",
         "token_projection": "linear_layernorm_gelu",
@@ -684,6 +716,7 @@ def run_compression(
     llm_steps: int = 1,
     log_every: int = 1,
     checkpoint_every: int = 0,
+    train_batch_size: int = 0,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -739,6 +772,7 @@ def run_compression(
             log_every=log_every,
             checkpoint_every=checkpoint_every,
             checkpoint_dir=artifact_dir / f"{method}_checkpoints",
+            train_batch_size=train_batch_size,
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
@@ -746,7 +780,18 @@ def run_compression(
         token_mask = _temporal_token_mask(cache_matrix.shapes, cache_matrix.aligned_shapes)
         normalized_for_latents = ((temporal - mean) / std) * token_mask.unsqueeze(-1).float()
         with torch.no_grad():
-            z = compressor.encode(normalized_for_latents, token_mask=token_mask).detach()
+            latent_batches = []
+            batch_size = int(stats.get("train_batch_size") or normalized_for_latents.shape[0])
+            batch_size = max(1, min(batch_size, int(normalized_for_latents.shape[0])))
+            for batch_start in range(0, int(normalized_for_latents.shape[0]), batch_size):
+                batch_stop = min(batch_start + batch_size, int(normalized_for_latents.shape[0]))
+                latent_batches.append(
+                    compressor.encode(
+                        normalized_for_latents[batch_start:batch_stop],
+                        token_mask=token_mask[batch_start:batch_stop],
+                    ).detach()
+                )
+            z = torch.cat(latent_batches, dim=0)
         artifact.update(
             {
                 "state_dict": compressor.state_dict(),
