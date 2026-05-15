@@ -11,7 +11,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from .cache import cache_shapes, flatten_cache, load_cache_bundle
+from .cache import cache_shapes, cache_to_device, choose_device, flatten_cache, load_cache_bundle, load_model_and_tokenizer
+from .injection import _forward_parameters
 from .schemas import CompressionResult, read_jsonl, write_json
 
 
@@ -98,6 +99,167 @@ def _compact_reconstructions(reconstructed: torch.Tensor, shapes: list[Any], ali
     max_len = max(int(row.numel()) for row in compact)
     padded = [torch.nn.functional.pad(row, (0, max_len - row.numel())) for row in compact]
     return torch.stack(padded).float()
+
+
+def _temporal_token_count(aligned_shapes: list[Any]) -> int:
+    return int(aligned_shapes[0][0][-2])
+
+
+def _shape_without_token(shape: tuple[int, ...]) -> tuple[int, ...]:
+    token_axis = len(shape) - 2
+    return tuple(shape[:token_axis] + shape[token_axis + 1 :])
+
+
+def _temporal_feature_dim(aligned_shapes: list[Any]) -> int:
+    token_count = _temporal_token_count(aligned_shapes)
+    return sum(int(torch.tensor(shape).prod().item()) // token_count for layer in aligned_shapes for shape in layer)
+
+
+def _aligned_vector_to_temporal(vector: torch.Tensor, aligned_shapes: list[Any]) -> torch.Tensor:
+    vector = vector.detach().cpu().float().reshape(-1)
+    offset = 0
+    token_parts = []
+    for key_shape, value_shape in aligned_shapes:
+        for aligned_shape in (key_shape, value_shape):
+            size = int(torch.tensor(aligned_shape).prod().item())
+            tensor = vector[offset : offset + size].reshape(aligned_shape)
+            offset += size
+            token_axis = len(aligned_shape) - 2
+            token_first = tensor.movedim(token_axis, 0).reshape(int(aligned_shape[token_axis]), -1)
+            token_parts.append(token_first)
+    if offset != vector.numel():
+        raise ValueError(f"Temporal conversion consumed {offset} values from vector with {vector.numel()} values")
+    return torch.cat(token_parts, dim=-1) if token_parts else torch.empty(0, 0)
+
+
+def _temporal_to_aligned_vector(sequence: torch.Tensor, aligned_shapes: list[Any]) -> torch.Tensor:
+    sequence = sequence.detach().cpu().float()
+    offset = 0
+    parts = []
+    token_count = int(sequence.shape[0])
+    for key_shape, value_shape in aligned_shapes:
+        for aligned_shape in (key_shape, value_shape):
+            token_axis = len(aligned_shape) - 2
+            feature_shape = _shape_without_token(tuple(aligned_shape))
+            feature_size = int(torch.tensor(feature_shape).prod().item())
+            token_first = sequence[:, offset : offset + feature_size].reshape((token_count, *feature_shape))
+            offset += feature_size
+            tensor = token_first.movedim(0, token_axis).reshape(aligned_shape)
+            parts.append(tensor.reshape(-1))
+    if offset != sequence.shape[-1]:
+        raise ValueError(f"Temporal conversion consumed {offset} features from sequence with {sequence.shape[-1]} features")
+    return torch.cat(parts) if parts else torch.empty(0)
+
+
+def _temporal_to_aligned_vector_grad(sequence: torch.Tensor, aligned_shapes: list[Any]) -> torch.Tensor:
+    offset = 0
+    parts = []
+    token_count = int(sequence.shape[0])
+    for key_shape, value_shape in aligned_shapes:
+        for aligned_shape in (key_shape, value_shape):
+            token_axis = len(aligned_shape) - 2
+            feature_shape = _shape_without_token(tuple(aligned_shape))
+            feature_size = int(torch.tensor(feature_shape).prod().item())
+            token_first = sequence[:, offset : offset + feature_size].reshape((token_count, *feature_shape))
+            offset += feature_size
+            parts.append(token_first.movedim(0, token_axis).reshape(aligned_shape).reshape(-1))
+    if offset != sequence.shape[-1]:
+        raise ValueError(f"Temporal conversion consumed {offset} features from sequence with {sequence.shape[-1]} features")
+    return torch.cat(parts) if parts else sequence.new_empty(0)
+
+
+def _aligned_to_compact_grad(vector: torch.Tensor, shapes: list[Any], aligned_shapes: list[Any]) -> torch.Tensor:
+    vector = vector.reshape(-1)
+    offset = 0
+    parts = []
+    for layer_idx, (key_shape, value_shape) in enumerate(shapes):
+        for source_shape, aligned_shape in [(key_shape, aligned_shapes[layer_idx][0]), (value_shape, aligned_shapes[layer_idx][1])]:
+            size = int(torch.tensor(aligned_shape).prod().item())
+            tensor = vector[offset : offset + size].reshape(aligned_shape)
+            offset += size
+            slices = tuple(slice(0, dim) for dim in source_shape)
+            parts.append(tensor[slices].reshape(-1))
+    return torch.cat(parts) if parts else vector.new_empty(0)
+
+
+def _unflatten_cache_grad(vector: torch.Tensor, shapes: list[tuple[tuple[int, ...], tuple[int, ...]]]) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+    vector = vector.reshape(-1)
+    offset = 0
+    layers = []
+    for key_shape, value_shape in shapes:
+        key_size = int(torch.tensor(key_shape).prod().item())
+        value_size = int(torch.tensor(value_shape).prod().item())
+        key = vector[offset : offset + key_size].reshape(key_shape)
+        offset += key_size
+        value = vector[offset : offset + value_size].reshape(value_shape)
+        offset += value_size
+        layers.append((key, value))
+    if offset != vector.numel():
+        raise ValueError(f"Vector has {vector.numel()} values but shapes consumed {offset}")
+    return tuple(layers)
+
+
+def _cache_prefix(cache: Any, token_count: int) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+    return tuple((key[..., :token_count, :], value[..., :token_count, :]) for key, value in cache)
+
+
+def _prompt_state_transition_logits(
+    bundle: dict[str, Any],
+    cache: Any,
+    model: Any,
+    device: torch.device,
+    steps: int,
+) -> list[torch.Tensor]:
+    input_ids = bundle.get("input_ids")
+    attention_mask = bundle.get("attention_mask")
+    if input_ids is None:
+        raise ValueError("Bundle must contain input_ids for frozen-LLM temporal loss")
+    input_ids = input_ids.to(device)
+    prompt_len = int(input_ids.shape[-1])
+    max_steps = min(max(0, int(steps)), max(0, prompt_len - 1))
+    if max_steps == 0:
+        return []
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    attention_mask = attention_mask.to(device)
+    forward_parameters = _forward_parameters(model)
+    logits_by_step: list[torch.Tensor] = []
+    for step_idx in range(max_steps):
+        prefix_len = step_idx + 1
+        model_kwargs = {
+            "input_ids": input_ids[:, prefix_len : prefix_len + 1],
+            "attention_mask": attention_mask[:, : prefix_len + 1],
+            "past_key_values": _cache_prefix(cache, prefix_len),
+            "use_cache": True,
+            "return_dict": True,
+        }
+        position = torch.tensor([[prefix_len]], dtype=torch.long, device=device)
+        if "position_ids" in forward_parameters:
+            model_kwargs["position_ids"] = position
+        if "cache_position" in forward_parameters:
+            model_kwargs["cache_position"] = position.reshape(-1)
+        outputs = model(**model_kwargs)
+        logits_by_step.append(outputs.logits[:, -1, :])
+    return logits_by_step
+
+
+def _temporal_matrix(x: torch.Tensor, aligned_shapes: list[Any]) -> torch.Tensor:
+    return torch.stack([_aligned_vector_to_temporal(row, aligned_shapes) for row in x]).float()
+
+
+def _temporal_token_mask(shapes: list[Any], aligned_shapes: list[Any]) -> torch.Tensor:
+    max_tokens = _temporal_token_count(aligned_shapes)
+    rows = []
+    for shape in shapes:
+        token_count = int(shape[0][0][-2])
+        row = torch.zeros(max_tokens, dtype=torch.bool)
+        row[:token_count] = True
+        rows.append(row)
+    return torch.stack(rows)
+
+
+def _temporal_reconstructions_to_aligned(reconstructed: torch.Tensor, aligned_shapes: list[Any]) -> torch.Tensor:
+    return torch.stack([_temporal_to_aligned_vector(row, aligned_shapes) for row in reconstructed]).float()
 
 
 def load_cache_matrix(run_dir: Path) -> CacheMatrix:
@@ -208,25 +370,23 @@ class AutoEncoder(nn.Module):
         return self.decode(self.encode(x))
 
 
-class ChunkedLSTMAutoEncoder(nn.Module):
+class TemporalLSTMAutoEncoder(nn.Module):
     def __init__(
         self,
-        input_dim: int,
+        token_dim: int,
+        max_tokens: int,
         latent_dim: int,
-        chunk_dim: int = 128,
         hidden_dim: int = 128,
         num_layers: int = 1,
     ) -> None:
         super().__init__()
-        self.input_dim = input_dim
+        self.token_dim = token_dim
+        self.max_tokens = max_tokens
         self.latent_dim = latent_dim
-        self.chunk_dim = max(1, min(chunk_dim, max(1, input_dim)))
-        self.padded_dim = ((input_dim + self.chunk_dim - 1) // self.chunk_dim) * self.chunk_dim
-        self.seq_len = self.padded_dim // self.chunk_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.chunk_to_hidden = nn.Sequential(
-            nn.Linear(self.chunk_dim, hidden_dim),
+        self.token_to_hidden = nn.Sequential(
+            nn.Linear(token_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         )
@@ -239,25 +399,24 @@ class ChunkedLSTMAutoEncoder(nn.Module):
         self.to_latent = nn.Linear(hidden_dim * 2, latent_dim)
         self.latent_to_hidden = nn.Linear(latent_dim, num_layers * hidden_dim)
         self.latent_to_decoder_input = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_positions = nn.Parameter(torch.randn(self.seq_len, hidden_dim) * 0.02)
+        self.decoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
         self.decoder = nn.LSTM(
             input_size=hidden_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
         )
-        self.output = nn.Linear(hidden_dim, self.chunk_dim)
+        self.output = nn.Linear(hidden_dim, token_dim)
 
-    def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[1] < self.padded_dim:
-            x = torch.nn.functional.pad(x, (0, self.padded_dim - x.shape[1]))
-        return x[:, : self.padded_dim].reshape(x.shape[0], self.seq_len, self.chunk_dim)
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        sequence = self._to_sequence(x)
-        projected = self.chunk_to_hidden(sequence)
+    def encode(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        projected = self.token_to_hidden(sequence)
         encoded, (hidden, _) = self.encoder(projected)
-        summary = torch.cat([hidden[-1], encoded.mean(dim=1)], dim=-1)
+        if token_mask is None:
+            pooled = encoded.mean(dim=1)
+        else:
+            weights = token_mask.float().unsqueeze(-1)
+            pooled = (encoded * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        summary = torch.cat([hidden[-1], pooled], dim=-1)
         return self.to_latent(summary)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -267,11 +426,10 @@ class ChunkedLSTMAutoEncoder(nn.Module):
         decoder_step = self.latent_to_decoder_input(z).unsqueeze(1)
         decoder_input = decoder_step + self.decoder_positions.unsqueeze(0)
         decoded, _ = self.decoder(decoder_input, (hidden, cell))
-        chunks = self.output(decoded).reshape(batch, self.padded_dim)
-        return chunks[:, : self.input_dim]
+        return self.output(decoded)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decode(self.encode(x))
+    def forward(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        return self.decode(self.encode(sequence, token_mask=token_mask))
 
 
 def train_autoencoder(
@@ -313,86 +471,185 @@ def train_autoencoder(
     return model, mse, history
 
 
-def train_lstm_seq2seq_autoencoder(
+def train_temporal_lstm_autoencoder(
     x: torch.Tensor,
-    valid_mask: torch.Tensor,
+    shapes: list[Any],
+    aligned_shapes: list[Any],
     latent_dim: int,
+    cache_paths: list[str] | None = None,
     epochs: int = 1,
     lr: float = 1e-3,
     seed: int = 0,
     weight_decay: float = 1e-2,
-    chunk_dim: int = 4096,
     hidden_dim: int = 128,
+    num_layers: int = 1,
+    llm_model_id: str | None = None,
+    llm_device_name: str = "auto",
+    llm_loss_weight: float = 0.0,
+    llm_steps: int = 1,
     progress_path: Path | None = None,
     log_every: int = 1,
-) -> tuple[ChunkedLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
+    checkpoint_every: int = 0,
+    checkpoint_dir: Path | None = None,
+) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     torch.manual_seed(seed)
-    counts = valid_mask.sum(dim=0, keepdim=True).clamp_min(1).float()
-    masked_x = x.masked_fill(~valid_mask, 0.0)
-    mean = masked_x.sum(dim=0, keepdim=True) / counts
-    variance = (((x - mean).masked_fill(~valid_mask, 0.0)) ** 2).sum(dim=0, keepdim=True) / counts
+    llm_loss_weight = float(llm_loss_weight)
+    training_device = choose_device(llm_device_name) if llm_loss_weight > 0 else torch.device("cpu")
+    sequence = _temporal_matrix(x, aligned_shapes).to(training_device)
+    token_mask = _temporal_token_mask(shapes, aligned_shapes).to(training_device)
+    feature_mask = token_mask.unsqueeze(-1).float()
+    denominator = (feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
+    counts = feature_mask.sum(dim=(0, 1), keepdim=True).clamp_min(1.0)
+    masked_sequence = sequence * feature_mask
+    mean = masked_sequence.sum(dim=(0, 1), keepdim=True) / counts
+    variance = (((sequence - mean) * feature_mask) ** 2).sum(dim=(0, 1), keepdim=True) / counts
     std = variance.sqrt().clamp_min(1e-6)
-    normalized = (x - mean) / std
-    normalized = normalized.masked_fill(~valid_mask, 0.0)
-    loss_mask = valid_mask.float()
-    loss_denominator = loss_mask.sum().clamp_min(1.0)
-    model = ChunkedLSTMAutoEncoder(
-        input_dim=x.shape[1],
+    normalized = ((sequence - mean) / std) * feature_mask
+    model = TemporalLSTMAutoEncoder(
+        token_dim=sequence.shape[-1],
+        max_tokens=sequence.shape[1],
         latent_dim=latent_dim,
-        chunk_dim=chunk_dim,
         hidden_dim=hidden_dim,
-    )
+        num_layers=num_layers,
+    ).to(training_device)
+    llm = None
+    llm_bundles: list[dict[str, Any]] = []
+    target_transition_logits: list[list[torch.Tensor]] = []
+    if llm_loss_weight > 0:
+        if not cache_paths:
+            raise ValueError("cache_paths are required when llm_loss_weight > 0")
+        first_bundle = load_cache_bundle(Path(cache_paths[0]))
+        chosen_model_id = llm_model_id or str((first_bundle.get("metadata") or {}).get("model_id") or "")
+        if not chosen_model_id:
+            raise ValueError("llm_model_id is required when cache metadata has no model_id")
+        llm, _ = load_model_and_tokenizer(chosen_model_id, training_device, local_files_only=True)
+        expected_layers = int(getattr(llm.config, "num_hidden_layers", len(shapes[0])))
+        if len(shapes[0]) != expected_layers:
+            raise ValueError(
+                f"Frozen-LLM loss requires full-layer caches; got {len(shapes[0])} cache layers for model with {expected_layers} layers"
+            )
+        for parameter in llm.parameters():
+            parameter.requires_grad_(False)
+        llm_bundles = [load_cache_bundle(Path(path)) for path in cache_paths]
+        with torch.no_grad():
+            target_transition_logits = [
+                [logits.detach() for logits in _prompt_state_transition_logits(bundle, cache_to_device(bundle["cache"], training_device), llm, training_device, llm_steps)]
+                for bundle in llm_bundles
+            ]
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
+    if checkpoint_every > 0 and checkpoint_dir is not None:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
     for epoch in range(1, epochs + 1):
         opt.zero_grad(set_to_none=True)
-        reconstructed = model(normalized)
-        loss = (((reconstructed - normalized) ** 2) * loss_mask).sum() / loss_denominator
+        reconstructed_norm = model(normalized, token_mask=token_mask)
+        reconstruction_loss = (((reconstructed_norm - normalized) ** 2) * feature_mask).sum() / denominator
+        llm_loss = reconstructed_norm.new_tensor(0.0)
+        if llm is not None and llm_loss_weight > 0:
+            reconstructed_sequence = ((reconstructed_norm * std) + mean) * feature_mask
+            transition_losses = []
+            for row_idx, row in enumerate(reconstructed_sequence):
+                aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
+                compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
+                reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
+                predicted_logits = _prompt_state_transition_logits(
+                    llm_bundles[row_idx],
+                    reconstructed_cache,
+                    llm,
+                    training_device,
+                    llm_steps,
+                )
+                for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
+                    target_probs = torch.softmax(target.detach(), dim=-1)
+                    predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
+                    transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
+            if transition_losses:
+                llm_loss = torch.stack(transition_losses).mean()
+        loss = reconstruction_loss + (llm_loss_weight * llm_loss)
         loss.backward()
         opt.step()
         event = {
-            "chunk_dim": model.chunk_dim,
             "elapsed_s": time.perf_counter() - start,
             "epoch": epoch,
             "epochs": epochs,
             "hidden_dim": model.hidden_dim,
+            "num_layers": model.num_layers,
             "loss": float(loss.detach().item()),
-            "loss_components": {"masked_reconstruction_mse": float(loss.detach().item()), "kl": 0.0},
-            "method": "rae_lstm",
+            "loss_components": {
+                "masked_temporal_reconstruction_mse": float(reconstruction_loss.detach().item()),
+                "frozen_llm_prompt_transition_kl": float(llm_loss.detach().item()),
+            },
+            "method": "rae_temporal",
             "masked_loss": True,
-            "objective": "masked_reconstruction_mse_no_kl",
-            "seq_len": model.seq_len,
-            "valid_values": int(loss_mask.sum().item()),
+            "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
+            "seq_len": model.max_tokens,
+            "token_dim": model.token_dim,
+            "valid_tokens": int(token_mask.sum().item()),
+            "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
+            "llm_loss_weight": llm_loss_weight,
+            "llm_steps": int(llm_steps),
+            "llm_gradients": llm is not None and llm_loss_weight > 0,
             "weight_decay": weight_decay,
         }
         history.append(event)
         if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
             _append_training_event(progress_path, event)
             print(
-                f"[rae_lstm epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
-                f"seq_len={model.seq_len} elapsed={event['elapsed_s']:.1f}s",
+                f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
+                f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
+                f"llm_kl={event['loss_components']['frozen_llm_prompt_transition_kl']:.6g} "
+                f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s",
                 flush=True,
             )
+        if checkpoint_every > 0 and checkpoint_dir is not None and (epoch == 1 or epoch == epochs or epoch % checkpoint_every == 0):
+            checkpoint = {
+                "method": "rae_temporal",
+                "epoch": epoch,
+                "epochs": epochs,
+                "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+                "normalization_mean": mean.detach().cpu(),
+                "normalization_std": std.detach().cpu(),
+                "latent_dim": latent_dim,
+                "hidden_dim": model.hidden_dim,
+                "num_layers": model.num_layers,
+                "seq_len": model.max_tokens,
+                "token_dim": model.token_dim,
+                "latest_event": event,
+                "llm_loss_weight": llm_loss_weight,
+                "llm_steps": int(llm_steps),
+                "weight_decay": weight_decay,
+            }
+            checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
+            torch.save(checkpoint, checkpoint_path)
+            torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
     with torch.no_grad():
-        z = model.encode(normalized).detach()
-        reconstructed = (model.decode(z).detach() * std) + mean
+        z = model.encode(normalized, token_mask=token_mask).detach()
+        reconstructed_sequence = (model.decode(z).detach() * std) + mean
+        reconstructed_sequence = reconstructed_sequence * feature_mask
+        reconstructed = _temporal_reconstructions_to_aligned(reconstructed_sequence.cpu(), aligned_shapes)
         mse = reconstruction_mse(x, reconstructed)
+    model = model.cpu()
     stats = {
         "normalization_mean": mean.detach().cpu(),
         "normalization_std": std.detach().cpu(),
-        "chunk_dim": model.chunk_dim,
         "hidden_dim": model.hidden_dim,
-        "seq_len": model.seq_len,
+        "num_layers": model.num_layers,
+        "seq_len": model.max_tokens,
+        "token_dim": model.token_dim,
         "weight_decay": weight_decay,
         "masked_loss": True,
-        "objective": "masked_reconstruction_mse_no_kl",
-        "kl_loss_weight": 0.0,
+        "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
+        "kl_loss_weight": llm_loss_weight,
+        "frozen_llm_prompt_transition_kl_weight": llm_loss_weight,
+        "frozen_llm_prompt_transition_steps": int(llm_steps),
+        "frozen_llm_gradients": llm_loss_weight > 0,
         "regularization": "adamw_weight_decay_only",
-        "decoder_conditioning": "latent_repeated_input_plus_learned_position",
-        "latent_summary": "last_hidden_plus_mean_encoded",
-        "chunk_projection": "linear_layernorm_gelu",
-        "latent_encoding_input": "masked_normalized_cache",
+        "decoder_conditioning": "latent_repeated_input_plus_learned_temporal_position",
+        "latent_summary": "last_hidden_plus_masked_mean_encoded",
+        "token_projection": "linear_layernorm_gelu",
+        "latent_encoding_input": "masked_normalized_temporal_token_cache",
+        "input_representation": "temporal_full_cache_token_states",
         "vector_alignment": "per_layer_key_value_token_padding",
         "decoder_source": "latent_only",
         "uses_retrieval_residual": False,
@@ -419,13 +676,17 @@ def run_compression(
     epochs: int = 1,
     lr: float = 1e-3,
     weight_decay: float = 1e-2,
-    chunk_dim: int = 4096,
     hidden_dim: int = 128,
+    num_layers: int = 1,
+    llm_model_id: str | None = None,
+    llm_device_name: str = "auto",
+    llm_loss_weight: float = 0.0,
+    llm_steps: int = 1,
     log_every: int = 1,
+    checkpoint_every: int = 0,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
-    valid_mask = cache_matrix.mask
     artifact_dir = run_dir / "compressions"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     method = method.lower()
@@ -457,32 +718,42 @@ def run_compression(
         z = compressor.encode(x).detach()
         reconstructed = compressor.decode(z).detach()
         artifact.update({"state_dict": compressor.state_dict(), "train_mse": mse, "training_history": history})
-    elif method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}:
-        compressor, reconstructed, mse, stats, history = train_lstm_seq2seq_autoencoder(
+    elif method in {"rae_temporal", "temporal_rae", "temporal_lstm"}:
+        compressor, reconstructed, mse, stats, history = train_temporal_lstm_autoencoder(
             x,
-            valid_mask,
+            cache_matrix.shapes,
+            cache_matrix.aligned_shapes,
             latent_dim,
+            cache_paths=cache_matrix.paths,
             epochs=epochs,
             lr=lr,
             seed=seed,
             weight_decay=weight_decay,
-            chunk_dim=chunk_dim,
             hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            llm_model_id=llm_model_id,
+            llm_device_name=llm_device_name,
+            llm_loss_weight=llm_loss_weight,
+            llm_steps=llm_steps,
             progress_path=progress_path,
             log_every=log_every,
+            checkpoint_every=checkpoint_every,
+            checkpoint_dir=artifact_dir / f"{method}_checkpoints",
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
-        normalized_for_latents = ((x - mean) / std).masked_fill(~valid_mask, 0.0)
+        temporal = _temporal_matrix(x, cache_matrix.aligned_shapes)
+        token_mask = _temporal_token_mask(cache_matrix.shapes, cache_matrix.aligned_shapes)
+        normalized_for_latents = ((temporal - mean) / std) * token_mask.unsqueeze(-1).float()
         with torch.no_grad():
-            z = compressor.encode(normalized_for_latents).detach()
+            z = compressor.encode(normalized_for_latents, token_mask=token_mask).detach()
         artifact.update(
             {
                 "state_dict": compressor.state_dict(),
                 "train_mse": mse,
                 "normalization_mean": mean,
                 "normalization_std": std,
-                "codec_kind": "lstm_seq2seq_rae",
+                "codec_kind": "temporal_lstm_rae",
                 "training_history": history,
                 **stats,
             }
@@ -492,7 +763,7 @@ def run_compression(
         reconstructed, _ = nearest_neighbor_reconstruct(x)
         artifact.update({"note": "nearest-neighbour cache reconstruction baseline"})
     else:
-        raise ValueError("method must be random, pca_svd, autoencoder, or retrieval")
+        raise ValueError("method must be random, pca_svd, autoencoder, rae_temporal, or retrieval")
 
     compact_reconstructed = _compact_reconstructions(reconstructed, cache_matrix.shapes, cache_matrix.aligned_shapes)
     compact_original = _compact_reconstructions(x, cache_matrix.shapes, cache_matrix.aligned_shapes)
@@ -514,8 +785,8 @@ def run_compression(
             "codec_contract": {
                 "point_codec": True,
                 "geometry_only": False,
-                "input_representation": "chunked_flattened_full_cache"
-                if method in {"rae_lstm", "lstm_seq2seq", "lstm_rae"}
+                "input_representation": "temporal_full_cache_token_states"
+                if method in {"rae_temporal", "temporal_rae", "temporal_lstm"}
                 else "flattened_full_cache",
                 "one_latent_per_cache": True,
                 "decodes_to": "flattened_cache_vector",
@@ -537,6 +808,7 @@ def run_compression(
             "input_dim": float(x.shape[1]),
             "point_codec": 1.0,
             "training_log_written": 1.0 if progress_path.exists() else 0.0,
+            "frozen_llm_gradients": 1.0 if method in {"rae_temporal", "temporal_rae", "temporal_lstm"} and llm_loss_weight > 0 else 0.0,
         },
     )
     write_json(artifact_dir / f"{method}_result.json", result.__dict__)

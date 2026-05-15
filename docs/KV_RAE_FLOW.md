@@ -1,16 +1,21 @@
 # KV RAE End-to-End Flow
 
-This note describes the current `rae_lstm` point-codec path in the latent-KV
-planning prototype. The key contract is:
+This note describes the current `rae_temporal` point-codec path in the
+latent-KV planning prototype. The key contract is:
 
 ```text
-entire prompt KV-cache sequence -> one latent plan point -> decoded KV-cache sequence
+entire prompt KV-cache temporal sequence -> one latent plan point -> decoded KV-cache temporal sequence
 ```
 
 The RAE decoder reconstructs transformer KV state. It does not directly decode
 an answer string. The local LLM then performs normal autoregressive decoding
 from the reconstructed cache, and the task verifier decides whether that replay
 or generated continuation solved the problem.
+
+During training, the local LLM may also be used as a frozen differentiable
+critic. Gradients flow through reconstructed KV tensors into the RAE, but the
+LLM weights stay frozen. This LLM loss is optional and auxiliary; the codec
+still learns sequence-to-point-to-sequence reconstruction.
 
 ## Full Flow
 
@@ -35,12 +40,17 @@ or generated continuation solved the problem.
         +------------------------------------------------+
                                |
                                v
-        prompt KV-cache sequence / planning-state trace
+        prompt KV-cache temporal sequence / planning trace
+        [state_1, state_2, ..., state_N]
+
+        where state_t contains every selected layer/head K,V value
+        for prompt token tok_t:
+
         {
-          layer_1:  K,V over tok_1..tok_N
-          layer_2:  K,V over tok_1..tok_N
+          layer_1:  K,V for tok_t
+          layer_2:  K,V for tok_t
           ...
-          layer_L:  K,V over tok_1..tok_N
+          layer_L:  K,V for tok_t
         }
                                |
                                v
@@ -61,40 +71,43 @@ or generated continuation solved the problem.
                                |
                                v
                     +---------------------+
-                    | flatten KV cache    |
+                    | align cache shapes  |
+                    | pad token axis only |
                     +---------------------+
                                |
                                v
-        flat cache vector x
-        [all selected layer/token/head K,V values ...]
+        temporal cache matrix
+        [state_1, state_2, ..., state_N, pad, ...]
+        shape: [tokens, token_state_dim]
                                |
                                v
                     +---------------------+
-                    | normalize x         |
-                    | (x - mean) / std    |
+                    | token mask          |
+                    | marks real tokens   |
                     +---------------------+
                                |
                                v
                     +---------------------+
-                    | split into chunks   |
+                    | normalize states    |
+                    | using real tokens   |
                     +---------------------+
                                |
                                v
         RAE input sequence
-        [chunk_1, chunk_2, ..., chunk_T]
+        [state_1_norm, state_2_norm, ..., state_N_norm]
                                |
                                v
                     +---------------------+
                     | LSTM encoder        |
-                    | reads chunk sequence|
+                    | reads token time    |
                     +---------------------+
                                |
                                v
-                    final encoder hidden state h_T
+        encoder summary: last hidden + masked mean encoded state
                                |
                                v
                     +---------------------+
-                    | linear h_T -> z     |
+                    | linear summary -> z |
                     +---------------------+
                                |
                                v
@@ -105,44 +118,90 @@ or generated continuation solved the problem.
                                |
                                v
                     +---------------------+
-                    | linear z -> h_0     |
-                    | decoder init state  |
+                    | z -> decoder state  |
+                    | + temporal positions|
                     +---------------------+
                                |
                                v
                     +---------------------+
                     | LSTM decoder        |
-                    | emits chunk sequence|
+                    | emits token states  |
                     +---------------------+
                                |
                                v
-        reconstructed RAE sequence
-        [chunk'_1, chunk'_2, ..., chunk'_T]
+        reconstructed temporal sequence
+        [state'_1, state'_2, ..., state'_N, pad, ...]
                                |
                                v
                     +---------------------+
-                    | concat chunks       |
-                    | crop padding        |
-                    | denormalize         |
+                    | apply token mask    |
+                    | denormalize states  |
                     +---------------------+
                                |
                                v
-        reconstructed flat cache vector x'
-                               |
-                               v
                     +---------------------+
-                    | unflatten by saved  |
-                    | KV shapes           |
+                    | restore layer/K/V   |
+                    | tensor layout       |
                     +---------------------+
                                |
                                v
-        reconstructed KV-cache sequence
+        reconstructed KV-cache temporal sequence
         {
           layer_1:  K',V' over tok_1..tok_N
           layer_2:  K',V' over tok_1..tok_N
           ...
           layer_L:  K',V' over tok_1..tok_N
         }
+                               |
+                               v
+================================================================================
+                       OPTIONAL FROZEN-LLM TRAINING SIGNAL
+================================================================================
+                               |
+                               v
+                    +---------------------+
+                    | freeze local LLM    |
+                    | no weight updates   |
+                    +---------------------+
+                               |
+                               v
+        compare original and reconstructed prompt-state transitions
+
+        for selected prompt positions t:
+          original prefix cache state_1..state_t
+          reconstructed prefix cache state'_1..state'_t
+          same next prompt token tok_{t+1}
+                               |
+                               v
+                    +---------------------+
+                    | frozen LLM forward  |
+                    | with original cache |
+                    +---------------------+
+                               |
+                               v
+                    original transition logits
+                               |
+                               v
+                    +---------------------+
+                    | frozen LLM forward  |
+                    | with decoded cache  |
+                    +---------------------+
+                               |
+                               v
+                    reconstructed transition logits
+                               |
+                               v
+                    +---------------------+
+                    | KL(original || rec) |
+                    | + reconstruction MSE|
+                    +---------------------+
+                               |
+                               v
+        gradients flow through decoded KV cache into the RAE only
+
+        Important: this is not answer-string decoding and not continuation
+        prediction as the main task. It is a differentiable state-quality loss
+        on the reconstructed temporal cache sequence.
                                |
                                v
 ================================================================================
@@ -193,14 +252,15 @@ Problem
   -> prompt text
   -> prompt tokens
   -> LLM prompt forward pass
-  -> original KV-cache sequence
+  -> original temporal KV-cache sequence
   -> verifier-labelled cache datapoint
-  -> flatten / normalize / chunk
-  -> LSTM encoder
+  -> align / temporalize / normalize
+  -> LSTM encoder over token time
   -> latent plan point z
-  -> LSTM decoder
-  -> reconstructed KV-cache sequence
-  -> LLM continuation from cache
+  -> LSTM decoder over token time
+  -> reconstructed temporal KV-cache sequence
+  -> optional frozen-LLM prompt-transition KL gradients during training
+  -> LLM continuation from reconstructed cache
   -> output text
   -> verifier outcome
 ```
@@ -209,7 +269,7 @@ Problem
 
 ```text
 RAE decoding:
-  z -> reconstructed KV cache
+  z -> reconstructed KV cache sequence
 
 LLM decoding:
   reconstructed KV cache -> next tokens -> output text
@@ -219,24 +279,52 @@ Keeping those separate is important. The RAE learns a bottlenecked cache-state
 representation. Behavioural usefulness is measured only after local LLM replay
 and task verification.
 
+## Training Objective
+
+The base objective is masked temporal reconstruction MSE over real prompt-token
+states:
+
+```text
+loss = MSE(original_temporal_cache, reconstructed_temporal_cache)
+```
+
+When `--llm-loss-weight` is greater than zero, training adds a frozen-LLM
+prompt-transition KL term:
+
+```text
+loss = reconstruction_mse
+     + llm_loss_weight * KL(
+         frozen_llm_logits(original_prefix_cache, next_prompt_token),
+         frozen_llm_logits(reconstructed_prefix_cache, next_prompt_token)
+       )
+```
+
+The LLM receives gradients through `past_key_values`, but all LLM parameters are
+frozen. Only the RAE encoder/decoder weights update.
+
 ## Variable Source Lengths
 
-Plan/cache sequences should keep their original lengths. Different prompts and
+Plan/cache sequences keep their original token lengths. Different prompts and
 different reasoning continuations naturally produce different token counts, and
 those lengths are part of the behavioural trace. For batching, the codec pads
-flattened cache vectors to a common width before chunking, but it also stores the
-original vector lengths and cache shapes. The scientific object remains one
-latent point per original variable-length sequence.
+the token axis to a common maximum length and stores token masks, original
+vector lengths, and cache shapes. The scientific object remains one latent
+point per original variable-length temporal sequence.
 
-Replay should likewise use the source record's original generation budget unless
-an experiment explicitly overrides it. Cache bundles for new prompt-cache
+Replay should use the source record's original generation budget unless an
+experiment explicitly overrides it. Cache bundles for new prompt-cache
 collections store generated token IDs and generation config so replay fidelity
 can be checked against the original local generation path.
 
 ## Current Qwen Smoke Dimensions
 
-For the local Qwen2.5-0.5B-Instruct smoke runs, one 128-token prompt cache over
-all 24 layers flattens to 786,432 values. With `chunk_dim=8192`, the RAE sees a
-96-step chunk sequence. Tiny smoke settings have used `latent_dim=16` and
-`hidden_dim=32`; larger runs should increase these deliberately and compare
-against retrieval/PCA baselines.
+For the local Qwen2.5-0.5B-Instruct success20 cache run, the temporal codec sees
+approximately:
+
+```text
+seq_len = 191 prompt tokens after token-axis padding
+token_dim = 6144 KV values per token state
+```
+
+Larger runs should increase `latent_dim`, `hidden_dim`, and epochs deliberately,
+and compare against retrieval/PCA baselines plus original-cache replay.

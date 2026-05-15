@@ -158,9 +158,14 @@ def cmd_compress(args: argparse.Namespace) -> int:
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        chunk_dim=args.chunk_dim,
         hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        llm_model_id=args.model_id,
+        llm_device_name=args.device,
+        llm_loss_weight=args.llm_loss_weight,
+        llm_steps=args.llm_steps,
         log_every=args.log_every,
+        checkpoint_every=args.checkpoint_every,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -207,6 +212,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             max_new_tokens=args.max_new_tokens,
             device_name=args.device,
             model_id=args.model_id,
+            limit=args.limit,
         )
     else:
         payload = evaluate_run(run_dir, baseline=args.baseline)
@@ -220,7 +226,7 @@ def cmd_behavior(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     baselines = args.baseline
     if baselines == ["all"]:
-        baselines = ["original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"]
+        baselines = ["original_cache", "random", "pca_svd", "autoencoder", "rae_temporal", "retrieval"]
     payload = None
     for baseline in baselines:
         payload = run_cache_behavioral_baseline(
@@ -229,6 +235,7 @@ def cmd_behavior(args: argparse.Namespace) -> int:
             max_new_tokens=args.max_new_tokens,
             device_name=args.device,
             model_id=args.model_id,
+            limit=args.limit,
         )
         print(f"Scored behavioural baseline: {baseline}")
     _write_basic_plots(run_dir)
@@ -439,15 +446,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     compress = sub.add_parser("compress", help="Run a compression baseline on saved caches")
     compress.add_argument("--run", required=True)
-    compress.add_argument("--method", default="random", choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    compress.add_argument("--method", default="random", choices=["random", "pca_svd", "autoencoder", "rae_temporal", "retrieval"])
     compress.add_argument("--latent-dim", type=int, default=64)
     compress.add_argument("--seed", type=int, default=0)
     compress.add_argument("--epochs", type=int, default=1)
     compress.add_argument("--lr", type=float, default=1e-3)
     compress.add_argument("--weight-decay", type=float, default=1e-2)
-    compress.add_argument("--chunk-dim", type=int, default=4096, help="Chunk size for sequence codecs such as rae_lstm.")
-    compress.add_argument("--hidden-dim", type=int, default=128, help="Hidden size for sequence codecs such as rae_lstm.")
+    compress.add_argument("--hidden-dim", type=int, default=128, help="Hidden size for sequence codecs such as rae_temporal.")
+    compress.add_argument("--num-layers", type=int, default=1, help="LSTM depth for sequence codecs such as rae_temporal.")
+    compress.add_argument("--model-id", default=None, help="Frozen local LLM for optional rae_temporal prompt-state KL gradients.")
+    compress.add_argument("--device", default="auto", help="Device for optional frozen-LLM prompt-state gradients.")
+    compress.add_argument("--llm-loss-weight", type=float, default=0.0, help="Weight for frozen-LLM prompt-state transition KL in rae_temporal training.")
+    compress.add_argument("--llm-steps", type=int, default=1, help="Prompt-token state transitions per cache for optional frozen-LLM KL.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
+    compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")
@@ -463,7 +475,6 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--baseline", default="no_cache")
     evaluate.add_argument(
         "--behavioral-baseline",
-        choices=["original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"],
         default=None,
         help="Replay a local cache baseline through the local model and score task behaviour.",
     )
@@ -475,6 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Replay token budget. Defaults to each record's original generated_tokens when omitted.",
     )
+    evaluate.add_argument("--limit", type=int, default=None, help="Limit behavioural replay records when --behavioral-baseline is used.")
     evaluate.set_defaults(func=cmd_evaluate)
 
     behavior = sub.add_parser("behavior", help="Run local behavioural replay baselines from saved caches")
@@ -483,7 +495,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline",
         nargs="+",
         default=["original_cache"],
-        choices=["all", "original_cache", "random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"],
     )
     behavior.add_argument("--model-id", default=None)
     behavior.add_argument("--device", default="auto")
@@ -493,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Replay token budget. Defaults to each record's original generated_tokens when omitted.",
     )
+    behavior.add_argument("--limit", type=int, default=None, help="Limit cache-backed records for partial artifacts or smoke runs.")
     behavior.set_defaults(func=cmd_behavior)
 
     validate_codec = sub.add_parser(
@@ -500,7 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate that compression latents decode to replay-compatible cache shapes",
     )
     validate_codec.add_argument("--run", required=True)
-    validate_codec.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    validate_codec.add_argument("--method", required=True, help="Compression artifact method, e.g. rae_temporal or retrieval.")
     validate_codec.set_defaults(func=cmd_validate_codec)
 
     replay_fidelity = sub.add_parser(
@@ -508,7 +520,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare original vs reconstructed-cache logits after the first replay step",
     )
     replay_fidelity.add_argument("--run", required=True)
-    replay_fidelity.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    replay_fidelity.add_argument("--method", required=True, help="Compression artifact method, e.g. rae_temporal.")
     replay_fidelity.add_argument("--model-id", default=None)
     replay_fidelity.add_argument("--device", default="auto")
     replay_fidelity.add_argument("--limit", type=int, default=None)
@@ -520,7 +532,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Summarize learned-codec training loss dynamics",
     )
     training_curve.add_argument("--run", required=True)
-    training_curve.add_argument("--method", required=True, choices=["autoencoder", "rae_lstm"])
+    training_curve.add_argument("--method", required=True, help="Learned codec method, e.g. autoencoder or rae_temporal.")
     training_curve.set_defaults(func=cmd_training_curve)
 
     corruption = sub.add_parser(
@@ -528,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay original-to-reconstructed cache interpolations to measure behavioural robustness",
     )
     corruption.add_argument("--run", required=True)
-    corruption.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    corruption.add_argument("--method", required=True, help="Compression artifact method, e.g. rae_temporal.")
     corruption.add_argument("--alpha", type=float, nargs="+", default=[0.0, 0.1, 0.25, 0.5, 1.0])
     corruption.add_argument("--model-id", default=None)
     corruption.add_argument("--device", default="auto")

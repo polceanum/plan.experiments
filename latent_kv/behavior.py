@@ -91,6 +91,7 @@ def run_cache_behavioral_baseline(
     max_new_tokens: int | None = None,
     device_name: str = "auto",
     model_id: str | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Score cache replay baselines using only local model weights.
 
@@ -100,15 +101,21 @@ def run_cache_behavioral_baseline(
     - pca_svd
     - autoencoder
     - retrieval
-    - rae_lstm
+    - rae_temporal
     """
 
     records = [row for row in read_jsonl(run_dir / "records.jsonl") if row.get("cache_path")]
+    if limit is not None:
+        records = records[: int(limit)]
     if not records:
         raise ValueError(f"No cache-backed records found in {run_dir}")
 
     baseline = baseline.lower()
-    reconstructed_methods = {"random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"}
+    reconstructed_methods = {"random", "pca_svd", "autoencoder", "rae_temporal", "retrieval"}
+    if baseline != "original_cache" and baseline not in reconstructed_methods:
+        latent_path = run_dir / "compressions" / f"{baseline}_latents.pt"
+        if latent_path.exists():
+            reconstructed_methods = reconstructed_methods | {baseline}
     if baseline not in reconstructed_methods | {"original_cache"}:
         raise ValueError(f"Unsupported behavioural baseline: {baseline}")
 

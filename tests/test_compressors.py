@@ -1,11 +1,20 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
+import latent_kv.compressors as compressors
 from latent_kv.cache import CacheTuple, flatten_cache, load_cache_bundle, save_cache_bundle
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
-from latent_kv.compressors import ChunkedLSTMAutoEncoder, _compact_reconstructions, load_cache_matrix, run_compression
+from latent_kv.compressors import (
+    TemporalLSTMAutoEncoder,
+    _compact_reconstructions,
+    _temporal_matrix,
+    _temporal_token_mask,
+    load_cache_matrix,
+    run_compression,
+)
 from latent_kv.schemas import CacheMetadata, TrajectoryRecord, append_jsonl
 from latent_kv.schemas import read_jsonl
 
@@ -107,6 +116,23 @@ def _write_variable_length_run(tmp_path: Path) -> None:
         )
 
 
+class _FakeFrozenLM(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(num_hidden_layers=1)
+
+    def forward(self, input_ids, attention_mask, past_key_values, use_cache=True, return_dict=True, **kwargs):
+        del input_ids, attention_mask, use_cache, return_dict, kwargs
+        cache_score = sum((key.float().mean() + value.float().mean()) for key, value in past_key_values)
+        logits = torch.stack([cache_score, -cache_score, cache_score * 0.5], dim=0).reshape(1, 1, 3)
+        return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+
+def _fake_load_model_and_tokenizer(model_id, device, local_files_only=True):
+    del model_id, local_files_only
+    return _FakeFrozenLM().to(device), object()
+
+
 def test_random_projection_compression_writes_artifacts(tmp_path: Path):
     _write_run(tmp_path)
     result = run_compression(tmp_path, method="random", latent_dim=2, seed=0)
@@ -158,75 +184,113 @@ def test_cache_validation_catches_shape_mismatch(tmp_path: Path):
     assert any("key_shape" in error for error in result.errors)
 
 
-def test_chunked_lstm_autoencoder_maps_sequence_to_one_point():
-    model = ChunkedLSTMAutoEncoder(input_dim=10, latent_dim=3, chunk_dim=4, hidden_dim=5)
-    x = torch.randn(2, 10)
+def test_temporal_lstm_autoencoder_maps_token_sequence_to_one_point():
+    model = TemporalLSTMAutoEncoder(token_dim=4, max_tokens=5, latent_dim=3, hidden_dim=6)
+    x = torch.randn(2, 5, 4)
+    mask = torch.tensor([[True, True, True, True, True], [True, True, True, False, False]])
 
-    z = model.encode(x)
+    z = model.encode(x, token_mask=mask)
     decoded = model.decode(z)
 
     assert z.shape == (2, 3)
     assert decoded.shape == x.shape
 
 
-def test_lstm_rae_compression_writes_decodable_point_artifact(tmp_path: Path):
-    _write_run(tmp_path)
+def test_temporal_rae_compression_uses_token_time_axis(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
     result = run_compression(
         tmp_path,
-        method="rae_lstm",
+        method="rae_temporal",
         latent_dim=3,
         seed=0,
         epochs=1,
-        chunk_dim=4,
         hidden_dim=5,
+        num_layers=1,
         weight_decay=0.02,
         log_every=1,
     )
-    validation = validate_reconstructed_artifact(tmp_path, "rae_lstm")
+    validation = validate_reconstructed_artifact(tmp_path, "rae_temporal")
     payload = torch.load(result.latent_path, map_location="cpu")
     artifact = torch.load(result.artifact_path, map_location="cpu")
 
     assert payload["latents"].shape == (2, 3)
-    assert payload["codec_contract"]["input_representation"] == "chunked_flattened_full_cache"
-    assert artifact["chunk_dim"] == 4
-    assert artifact["hidden_dim"] == 5
-    assert artifact["weight_decay"] == 0.02
-    assert artifact["masked_loss"] is True
-    assert artifact["objective"] == "masked_reconstruction_mse_no_kl"
-    assert artifact["kl_loss_weight"] == 0.0
-    assert artifact["regularization"] == "adamw_weight_decay_only"
-    assert artifact["decoder_conditioning"] == "latent_repeated_input_plus_learned_position"
-    assert artifact["latent_summary"] == "last_hidden_plus_mean_encoded"
-    assert artifact["chunk_projection"] == "linear_layernorm_gelu"
-    assert artifact["latent_encoding_input"] == "masked_normalized_cache"
-    assert artifact["vector_alignment"] == "per_layer_key_value_token_padding"
-    assert artifact["decoder_source"] == "latent_only"
-    assert artifact["uses_retrieval_residual"] is False
-    assert artifact["uses_per_cache_residual"] is False
-    assert len(artifact["training_history"]) == 1
-    training_rows = read_jsonl(tmp_path / "compressions" / "rae_lstm_training.jsonl")
-    assert training_rows[0]["method"] == "rae_lstm"
-    assert training_rows[0]["epoch"] == 1
-    assert training_rows[0]["masked_loss"] is True
-    assert training_rows[0]["objective"] == "masked_reconstruction_mse_no_kl"
-    assert training_rows[0]["loss_components"]["kl"] == 0.0
-    assert training_rows[0]["valid_values"] == 32
-    assert payload["training_log_path"].endswith("rae_lstm_training.jsonl")
-    assert payload["vector_alignment"] == "per_layer_key_value_token_padding"
+    assert payload["codec_contract"]["input_representation"] == "temporal_full_cache_token_states"
+    assert payload["lengths"] == [16, 12]
+    assert payload["reconstructed"].shape[1] == 16
+    assert artifact["codec_kind"] == "temporal_lstm_rae"
+    assert artifact["seq_len"] == 4
+    assert artifact["token_dim"] == 4
+    assert artifact["input_representation"] == "temporal_full_cache_token_states"
+    assert artifact["latent_encoding_input"] == "masked_normalized_temporal_token_cache"
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+    assert training_rows[0]["method"] == "rae_temporal"
+    assert training_rows[0]["valid_tokens"] == 7
+    assert training_rows[0]["valid_values"] == 28
     assert validation.records == 2
     assert validation.one_point_per_cache is True
     assert validation.valid_caches == 2
 
 
-def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
-    _write_variable_length_run(tmp_path)
+def test_temporal_rae_can_use_frozen_llm_prompt_state_gradients(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+    monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
+
     result = run_compression(
         tmp_path,
-        method="rae_lstm",
+        method="rae_temporal",
         latent_dim=3,
         seed=0,
         epochs=1,
-        chunk_dim=4,
+        hidden_dim=5,
+        llm_loss_weight=0.01,
+        llm_steps=1,
+        log_every=1,
+    )
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+
+    assert artifact["frozen_llm_gradients"] is True
+    assert artifact["frozen_llm_prompt_transition_kl_weight"] == 0.01
+    assert training_rows[0]["llm_gradients"] is True
+    assert "frozen_llm_prompt_transition_kl" in training_rows[0]["loss_components"]
+
+
+def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=2,
+        hidden_dim=5,
+        checkpoint_every=1,
+        log_every=0,
+    )
+
+    checkpoint_dir = tmp_path / "compressions" / "rae_temporal_checkpoints"
+    first = torch.load(checkpoint_dir / "rae_temporal_epoch_000001.pt", map_location="cpu")
+    latest = torch.load(checkpoint_dir / "rae_temporal_latest.pt", map_location="cpu")
+
+    assert first["epoch"] == 1
+    assert latest["epoch"] == 2
+    assert latest["latent_dim"] == 3
+    assert latest["hidden_dim"] == 5
+    assert latest["seq_len"] == 4
+    assert latest["token_dim"] == 4
+    assert "state_dict" in latest
+    assert "normalization_mean" in latest
+
+
+def test_temporal_rae_latents_use_masked_normalized_token_states(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
         hidden_dim=5,
         log_every=0,
     )
@@ -234,19 +298,20 @@ def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
     artifact = torch.load(result.artifact_path, map_location="cpu")
 
     cache_matrix = load_cache_matrix(tmp_path)
-    normalized = ((cache_matrix.matrix - artifact["normalization_mean"]) / artifact["normalization_std"]).masked_fill(
-        ~cache_matrix.mask, 0.0
-    )
+    temporal = _temporal_matrix(cache_matrix.matrix, cache_matrix.aligned_shapes)
+    token_mask = _temporal_token_mask(cache_matrix.shapes, cache_matrix.aligned_shapes)
+    normalized = ((temporal - artifact["normalization_mean"]) / artifact["normalization_std"]) * token_mask.unsqueeze(-1).float()
 
-    model = ChunkedLSTMAutoEncoder(
-        input_dim=cache_matrix.matrix.shape[1],
+    model = TemporalLSTMAutoEncoder(
+        token_dim=artifact["token_dim"],
+        max_tokens=artifact["seq_len"],
         latent_dim=artifact["latent_dim"],
-        chunk_dim=artifact["chunk_dim"],
         hidden_dim=artifact["hidden_dim"],
+        num_layers=artifact["num_layers"],
     )
     model.load_state_dict(artifact["state_dict"])
     with torch.no_grad():
-        expected = model.encode(normalized)
+        expected = model.encode(normalized, token_mask=token_mask)
 
     assert payload["lengths"] == [16, 12]
     assert payload["reconstructed"].shape[1] == 16

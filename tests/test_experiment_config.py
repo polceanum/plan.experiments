@@ -56,7 +56,7 @@ cache:
   layer_mode: upper
   storage_dtype: bfloat16
 codec:
-  type: rae_lstm_seq2seq
+  type: rae_temporal
   latent_dim: 128
 training:
   epochs: 2

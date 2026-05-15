@@ -370,3 +370,143 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use the sensitivity curve to set reconstruction targets: the current learned RAE error is far outside the behavioural tolerance, so reduce replay-critical error before broadening techniques.
+
+## 2026-05-15 - Frozen-LLM replay-aware RAE smoke
+
+### Worked
+
+- Added replay-train for latent-only RAE training through a frozen local LLM using teacher-forced replay KL plus masked cache MSE. Two-cache Qwen success-slice smoke ran end-to-end; loss decreased monotonically over 5 epochs and replay KL dropped from 0.0943 to 0.0831.
+
+### Did Not Work / Caveats
+
+- This was only a tiny smoke run with latent_dim=16, hidden_dim=16, limit=2, and one replay token, so it is not evidence that full-scale behavior is restored. Reconstruction MSE remains far above the observed behavioral tolerance.
+
+### Left To Do
+
+- Scale replay-aware training on runs/qwen_cache_cot_success20 with more records, more capacity, and 2-8 teacher-forced replay steps; compare against the 1-layer MSE-only RAE and PCA controls.
+
+## 2026-05-15 - Modest frozen-LLM replay-aware RAE run
+
+### Worked
+
+- Ran rae_lstm_replay_modest5 on runs/qwen_cache_cot_success20 with latent_dim=256, hidden_dim=256, one LSTM layer, limit=5, two teacher-forced replay steps, and 30 epochs. Training loss decreased monotonically from 0.8619 to 0.8247; teacher-forced replay KL dropped from 0.4054 to 0.0412. The resulting artifact validated 5/5 caches and replay-fidelity top-1 matched original logits for both measured steps.
+
+### Did Not Work / Caveats
+
+- Free-running behavior was still 0/5. The model matched the first teacher-forced replay decisions but drifted badly during full generation; reconstruction MSE remained high around 0.35 per-cache validation mean, far above the earlier corruption-tolerance threshold.
+
+### Left To Do
+
+- Next test longer teacher-forced horizons and/or replay loss on more continuation steps before increasing depth. Keep capacity modest, and compare whether multi-step replay KL predicts free-running recovery better than first-step top-1.
+
+## 2026-05-15 - Full-sequence replay-aware RAE scaling
+
+### Worked
+
+- Added replay-train gradient accumulation via --train-batch-size after the all-at-once full20/s4 run hit MPS OOM around epoch 10. Re-ran full20/s4 with latent_dim=512, hidden_dim=512, one LSTM layer, train_batch_size=1, 40 epochs, and replay_weight=0.2. Training replay KL dropped from 1.2667 to 0.0494; four-step replay fidelity reached top-1 rates [1.0, 0.85, 1.0, 1.0]. Also trained full20/s8 for 25 epochs; 8-step replay KL dropped from 1.4062 to 0.2543 and improved late-step fidelity compared with the s4 model.
+
+### Did Not Work / Caveats
+
+- Neither full20/s4 nor full20/s8 restored free-running GSM8K behavior; both scored 0/20. Validation MSE remains around 0.42-0.44 mean compact-cache MSE, still far above the earlier corruption-tolerance threshold. Teacher-forced top-1 agreement over 4-8 steps is not sufficient to keep long greedy generations on task.
+
+### Left To Do
+
+- Next improvements should target reconstruction fidelity and longer rollout stability: consider increasing MSE pressure/normalization quality, curriculum from MSE-only pretraining into replay loss, and measuring more rollout steps before spending more on depth.
+
+## 2026-05-15 - Initialized replay-aware RAE continuation
+
+### Worked
+
+- Added --init-method to replay-train so frozen-LLM replay training can initialize from an existing MSE-trained RAE. The initialized full20/s8 run used latent_dim=512, hidden_dim=512, one LSTM layer, chunk_dim=4096, mse_weight=2.0, replay_weight=0.2, and train_batch_size=1. Training loss decreased monotonically from 1.0443 to 0.8649 over 40 epochs, then a 20-epoch continuation dropped loss from 0.8628 to 0.8401 and replay KL from 0.1655 to 0.0821. Final 8-step replay fidelity improved to mean KL 0.0370 with top-1 rates [1.0, 0.9, 1.0, 1.0, 0.85, 1.0, 0.95, 0.8].
+
+### Did Not Work / Caveats
+
+- Free-running GSM8K behavior remains 0/20. Reconstruction validation mean remains around 0.34 compact-cache MSE, still far above the corruption-tolerance threshold. Longer training improves replay-fidelity curves but does not yet recover long greedy reasoning.
+
+### Left To Do
+
+- Next focus should be better reconstruction capacity/objective before more replay-only training: stronger MSE pretraining, larger but still shallow decoder capacity, or loss weighting by layer/head/token positions that matter for replay.
+
+## 2026-05-15 - Temporal token-state RAE codec
+
+### Worked
+
+- Replaced the artificial chunk sequence assumption with an explicit rae_temporal codec whose sequence axis is real token time. Each temporal step is the full KV state for one token across layers, key/value tensors, heads, and head dimensions. Added temporal codec support to replay-train via --codec-kind temporal and smoke-tested both MSE reconstruction and frozen-LLM replay paths on runs/qwen_cache_cot_success20.
+
+### Did Not Work / Caveats
+
+- The short 20-epoch temporal MSE smoke validated 20/20 caches but reconstruction MSE was still high around 1.94 mean validation MSE. A tiny temporal replay smoke validated caches but started with very high replay KL, as expected from random temporal weights. This fixes the representation, not the fidelity problem yet.
+
+### Left To Do
+
+- Train rae_temporal longer and/or initialize temporal replay from a stronger temporal MSE artifact. Compare temporal curves against the previous chunked RAE without treating chunked results as latent-planning evidence.
+
+## 2026-05-15 - Remove chunk-sequence RAE
+
+### Worked
+
+- Removed the previous flattened-chunk LSTM RAE and the misleading replay-training command surface; temporal token-state seq2seq RAE is now the only learned sequence codec exposed by the CLI.
+
+### Did Not Work / Caveats
+
+- No new training run was performed in this cleanup step; older chunk-based artifacts remain historical only and are no longer advertised as trainable methods.
+
+### Left To Do
+
+- Train the temporal seq2seq codec for longer on success20 now that the model axis matches token time.
+
+## 2026-05-15 - Temporal RAE frozen-LLM gradient signal
+
+### Worked
+
+- Added optional frozen-LLM prompt-state transition KL gradients to rae_temporal training while preserving the temporal seq2seq point-codec contract; updated docs/KV_RAE_FLOW.md to describe token-time states, one latent point, decoded KV sequence, and LLM replay.
+
+### Did Not Work / Caveats
+
+- No full Qwen training run was launched in this edit; the new LLM-gradient path was validated with a fake frozen-LLM unit test rather than local Qwen weights.
+
+### Left To Do
+
+- Run a full success20 rae_temporal experiment with and without --llm-loss-weight, then compare validation MSE, replay fidelity, and behavioural replay.
+
+## 2026-05-15 - Temporal RAE decoded cache solves one Qwen GSM8K task
+
+### Worked
+
+- Ran runs/qwen_cache_cot_success20_temporal_llm_smoke using one solved Qwen GSM8K cache. A tiny 1-epoch temporal+frozen-LLM run validated structurally but decoded behavior failed 0/1. A higher-capacity latent_dim=1024 hidden_dim=1024 run with --llm-loss-weight 0.001 and --llm-steps 1 for 500 epochs reduced compact reconstruction MSE to 9.50e-05 and recovered decoded-cache behavior: original_cache 1/1, rae_temporal 1/1, parsed answer 18.
+
+### Did Not Work / Caveats
+
+- Lower-capacity/shorter runs did not solve after decoding: 1 epoch produced repetitive text, and an 80-epoch latent_dim=256 hidden_dim=256 run parsed 1. A 200-epoch latent_dim=1024 run became coherent but answered 32, so solved behavior appears to require much tighter reconstruction than 0.0287 MSE on this example.
+
+### Left To Do
+
+- Scale carefully from one-cache overfit to a small multi-cache success slice, reporting decoded-cache task accuracy first, then reconstruction MSE and frozen-LLM transition KL as diagnostics.
+
+## 2026-05-15 - Temporal RAE frozen-LLM five-cache decoded behavior
+
+### Worked
+
+- Scaled the temporal point codec from one-cache overfit to a five-cache Qwen GSM8K success slice. The first 500-epoch run with latent_dim=1024 hidden_dim=1024 llm_loss_weight=0.001 validated 5/5 decoded caches and solved 1/5 after decoding. A longer 1500-epoch run with llm_loss_weight=0.0001 reduced mean validation MSE to 2.27e-04 and improved decoded-cache behavior to 3/5 while original_cache stayed 5/5.
+
+### Did Not Work / Caveats
+
+- The 500-epoch five-cache run had mean MSE 2.34e-02 and only 1/5 decoded-cache accuracy. The 1500-epoch run still failed two tasks: gsm8k_0006 parsed 160 instead of 260, and gsm8k_0024 parsed 14.625 instead of 26, so near-exact reconstruction remains necessary and MSE around 2e-4 is not universally sufficient.
+
+### Left To Do
+
+- Next run should either push five-cache reconstruction lower, add more prompt-transition positions for the frozen-LLM loss, or compare against an MSE-only temporal run at the same capacity to isolate the value of frozen-LLM gradients.
+
+## 2026-05-15 - Temporal RAE ten-cache scaling check
+
+### Worked
+
+- Scaled the temporal point codec to 10 solved Qwen GSM8K CoT caches in runs/qwen_cache_cot_success20_temporal_llm_10_big. A larger latent_dim=1536 hidden_dim=1536 attempt hit MPS OOM, so the stable latent_dim=1024 hidden_dim=1024 configuration trained for 2000 epochs with llm_loss_weight=0.0001 and llm_steps=1. Training loss fell from 1.00219 to 0.000104, compact compression MSE was 2.30e-04, validation found 10/10 structurally valid decoded caches with mean reconstruction MSE 2.68e-04, and original_cache control stayed 10/10.
+
+### Did Not Work / Caveats
+
+- Decoded-cache behaviour did not scale beyond the earlier success band: rae_temporal solved 3/10. Correct decoded tasks were gsm8k_0006, gsm8k_0033, and gsm8k_0034; failures were coherent arithmetic drift rather than invalid cache replay. The 1536/1536 capacity increase is not currently feasible on MPS alongside Qwen.
+
+### Left To Do
+
+- Try a more targeted fidelity objective before another long scaling run: more prompt-transition positions, layer/head/value-weighted reconstruction, or a staged MSE-to-LLM-loss schedule; keep behavioural decoded-cache accuracy as the headline metric.

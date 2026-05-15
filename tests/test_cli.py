@@ -45,7 +45,7 @@ def test_validate_codec_help_lists_method(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--method" in out
-    assert "rae_lstm" in out
+    assert "rae_temporal" in out
     assert "retrieval" in out
 
 
@@ -58,7 +58,7 @@ def test_replay_fidelity_help_lists_method(capsys):
     assert "--method" in out
     assert "--limit" in out
     assert "--steps" in out
-    assert "rae_lstm" in out
+    assert "rae_temporal" in out
 
 
 def test_training_curve_help_lists_method(capsys):
@@ -68,7 +68,7 @@ def test_training_curve_help_lists_method(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--method" in out
-    assert "rae_lstm" in out
+    assert "rae_temporal" in out
     assert "autoencoder" in out
 
 
@@ -80,7 +80,7 @@ def test_corruption_sensitivity_help_lists_alpha(capsys):
     out = capsys.readouterr().out
     assert "--alpha" in out
     assert "--method" in out
-    assert "rae_lstm" in out
+    assert "rae_temporal" in out
 
 
 def test_compress_help_lists_lstm_hyperparameters(capsys):
@@ -89,8 +89,12 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     except SystemExit as exc:
         assert exc.code == 0
     out = capsys.readouterr().out
-    assert "--chunk-dim" in out
     assert "--hidden-dim" in out
+    assert "--num-layers" in out
+    assert "--llm-loss-weight" in out
+    assert "--llm-steps" in out
+    assert "rae_temporal" in out
     assert "--weight-decay" in out
     assert "--log-every" in out
+    assert "--checkpoint-every" in out
 
