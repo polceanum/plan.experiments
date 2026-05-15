@@ -72,6 +72,17 @@ def test_training_curve_help_lists_method(capsys):
     assert "autoencoder" in out
 
 
+def test_corruption_sensitivity_help_lists_alpha(capsys):
+    try:
+        main(["corruption-sensitivity", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--alpha" in out
+    assert "--method" in out
+    assert "rae_lstm" in out
+
+
 def test_compress_help_lists_lstm_hyperparameters(capsys):
     try:
         main(["compress", "--help"])

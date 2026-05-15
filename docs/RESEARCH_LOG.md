@@ -355,3 +355,18 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use this success-only slice as the primary reconstruction target while improving the learned latent-only decoder; more epochs alone are unlikely to close the gap unless architecture/loss fidelity improves.
+
+## 2026-05-15 - RAE corruption sensitivity smoke
+
+### Worked
+
+- Added a corruption-sensitivity diagnostic that replays cache interpolations original + alpha*(reconstructed-original) without changing the latent-only decoder path.
+- On runs/qwen_cache_cot_success20 with method rae_lstm, a 3-record smoke curve showed alpha=0.0 preserved 3/3 solved behaviours while alpha=0.1 and alpha=1.0 both fell to 0/3.
+
+### Did Not Work / Caveats
+
+- The long 10-record, 7-alpha free-running sweep was too slow for interactive iteration and was stopped; future sweeps should use fewer records/alphas or a faster teacher-forced variant.
+
+### Left To Do
+
+- Use the sensitivity curve to set reconstruction targets: the current learned RAE error is far outside the behavioural tolerance, so reduce replay-critical error before broadening techniques.

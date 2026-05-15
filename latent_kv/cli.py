@@ -15,6 +15,7 @@ from .brief import get_brief
 from .cache import choose_device, collect_one, load_model_and_tokenizer, set_seed
 from .codec_validation import validate_reconstructed_artifact
 from .compressors import run_compression
+from .corruption_sensitivity import score_corruption_sensitivity
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .metrics import evaluate_run
@@ -377,6 +378,22 @@ def cmd_training_curve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_corruption_sensitivity(args: argparse.Namespace) -> int:
+    import json
+
+    summary = score_corruption_sensitivity(
+        run_dir=Path(args.run),
+        method=args.method,
+        alphas=args.alpha,
+        model_id=args.model_id,
+        device_name=args.device,
+        limit=args.limit,
+        max_new_tokens=args.max_new_tokens,
+    )
+    print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_inject(args: argparse.Namespace) -> int:
     bundle_path = Path(args.cache)
     summary = validate_bundle_for_injection(bundle_path)
@@ -505,6 +522,19 @@ def build_parser() -> argparse.ArgumentParser:
     training_curve.add_argument("--run", required=True)
     training_curve.add_argument("--method", required=True, choices=["autoencoder", "rae_lstm"])
     training_curve.set_defaults(func=cmd_training_curve)
+
+    corruption = sub.add_parser(
+        "corruption-sensitivity",
+        help="Replay original-to-reconstructed cache interpolations to measure behavioural robustness",
+    )
+    corruption.add_argument("--run", required=True)
+    corruption.add_argument("--method", required=True, choices=["random", "pca_svd", "autoencoder", "rae_lstm", "retrieval"])
+    corruption.add_argument("--alpha", type=float, nargs="+", default=[0.0, 0.1, 0.25, 0.5, 1.0])
+    corruption.add_argument("--model-id", default=None)
+    corruption.add_argument("--device", default="auto")
+    corruption.add_argument("--limit", type=int, default=None)
+    corruption.add_argument("--max-new-tokens", type=int, default=None)
+    corruption.set_defaults(func=cmd_corruption_sensitivity)
 
     prompt = sub.add_parser("prompt-baseline", help="Run local prompt baselines without remote APIs")
     prompt.add_argument("--run", required=True)
