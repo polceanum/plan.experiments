@@ -6,7 +6,9 @@ import latent_kv.prompt_cache_collection as prompt_cache_collection
 from latent_kv.benchmarks import load_hanoi
 from latent_kv.cache import CacheTuple, load_cache_bundle
 from latent_kv.prompt_cache_collection import run_prompt_cache_collection
+from latent_kv.prompt_cache_collection import run_existing_prompt_record_cache_collection
 from latent_kv.schemas import read_json, read_jsonl
+from latent_kv.schemas import TrajectoryRecord, append_jsonl
 
 
 def fake_cache() -> CacheTuple:
@@ -71,3 +73,90 @@ def test_prompt_cache_collection_writes_records_and_bundles(tmp_path: Path, monk
     assert bundle["generation_config"]["decoding_protocol"] == "greedy"
     assert payload["extra"]["prompt_cache_standard_local_model"] == "fake-model"
     assert metrics["baselines"][0]["baseline"] == "prompt_cache_standard"
+
+
+def test_existing_prompt_record_cache_collection_preserves_labels(tmp_path: Path, monkeypatch):
+    class FakeTokenizer:
+        chat_template = None
+        name_or_path = "fake-tokenizer"
+
+    def fake_load_model_and_tokenizer(model_id, device, local_files_only=True):
+        return object(), FakeTokenizer()
+
+    def fake_capture_prompt_cache(**kwargs):
+        return (
+            fake_cache(),
+            [0, 1],
+            3,
+            None,
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]]),
+            torch.randn(1, 10),
+        )
+
+    monkeypatch.setattr(prompt_cache_collection, "load_model_and_tokenizer", fake_load_model_and_tokenizer)
+    monkeypatch.setattr(prompt_cache_collection, "choose_device", lambda device_name: "cpu")
+    monkeypatch.setattr(prompt_cache_collection, "capture_prompt_cache", fake_capture_prompt_cache)
+
+    source = tmp_path / "source.jsonl"
+    append_jsonl(
+        source,
+        TrajectoryRecord(
+            run_id="source",
+            benchmark="gsm8k",
+            task_id="gsm8k_0000",
+            model_id="fake-model",
+            seed=0,
+            attempt_id=0,
+            prompt="prompt 0",
+            target="18",
+            output_text="answer 18",
+            parsed_answer="18",
+            correct=True,
+            retry_index=0,
+            generated_tokens=12,
+            prompt_tokens=2,
+            metadata={"prompt_baseline": "cot", "prompt_protocol": "zero_shot_cot", "decoding_protocol": "greedy"},
+        ),
+    )
+    append_jsonl(
+        source,
+        TrajectoryRecord(
+            run_id="source",
+            benchmark="gsm8k",
+            task_id="gsm8k_0001",
+            model_id="fake-model",
+            seed=0,
+            attempt_id=1,
+            prompt="prompt 1",
+            target="20",
+            output_text="answer 19",
+            parsed_answer="19",
+            correct=False,
+            retry_index=0,
+            generated_tokens=10,
+            prompt_tokens=2,
+            metadata={"prompt_baseline": "cot", "prompt_protocol": "zero_shot_cot", "decoding_protocol": "greedy"},
+        ),
+    )
+
+    run_dir = tmp_path / "attached"
+    payload = run_existing_prompt_record_cache_collection(
+        run_dir=run_dir,
+        source_records=source,
+        model_id="fake-model",
+    )
+
+    rows = read_jsonl(run_dir / "records.jsonl")
+    assert [row["correct"] for row in rows] == [True, False]
+    assert all(row["cache_path"] for row in rows)
+    assert rows[0]["output_text"] == "answer 18"
+    assert rows[1]["parsed_answer"] == "19"
+    assert rows[0]["metadata"]["cache_attached_from_existing_record"] is True
+    bundle = load_cache_bundle(Path(rows[1]["cache_path"]))
+    assert bundle["metadata"]["correct"] is False
+    assert bundle["metadata"]["prompt_baseline"] == "cot"
+    assert bundle["generation_config"]["attached_existing_output"] is True
+    assert payload["extra"]["prompt_cache_attached_source_total"] == 2
+    assert payload["extra"]["prompt_cache_attached_source_correct"] == 1
+    assert payload["extra"]["prompt_cache_attached_source_incorrect"] == 1

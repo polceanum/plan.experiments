@@ -19,7 +19,7 @@ from .corruption_sensitivity import score_corruption_sensitivity
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .metrics import evaluate_run
-from .prompt_cache_collection import run_prompt_cache_collection
+from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .replay_diagnostics import score_replay_fidelity
@@ -307,6 +307,25 @@ def cmd_collect_prompt_caches(args: argparse.Namespace) -> int:
     _write_basic_plots(Path(args.run))
     print(f"Wrote cache-backed prompt records to {args.run}")
     print(f"Baselines: {len(payload.get('baselines', []))}")
+    return 0
+
+
+def cmd_attach_prompt_caches(args: argparse.Namespace) -> int:
+    payload = run_existing_prompt_record_cache_collection(
+        run_dir=Path(args.run),
+        source_records=Path(args.source_records),
+        model_id=args.model_id or SMOKE_MODEL,
+        device_name=args.device or "auto",
+        layer_mode=args.layer_mode or "all",
+        capture_hidden=args.capture_hidden,
+        resume=args.resume,
+    )
+    _write_basic_plots(Path(args.run))
+    extra = payload.get("extra", {})
+    print(f"Wrote attached prompt-cache records to {args.run}")
+    print(f"Records: {extra.get('prompt_cache_attached_source_total')}")
+    print(f"Source correct: {extra.get('prompt_cache_attached_source_correct')}")
+    print(f"Source incorrect: {extra.get('prompt_cache_attached_source_incorrect')}")
     return 0
 
 
@@ -598,6 +617,19 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_cache.add_argument("--capture-hidden", action="store_true")
     prompt_cache.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
     prompt_cache.set_defaults(func=cmd_collect_prompt_caches)
+
+    attach_cache = sub.add_parser(
+        "attach-prompt-caches",
+        help="Attach replayable prompt KV caches to an existing prompt-record JSONL without regenerating outputs",
+    )
+    attach_cache.add_argument("--run", required=True)
+    attach_cache.add_argument("--source-records", required=True, help="Existing prompt baseline JSONL to preserve labels and outputs from.")
+    attach_cache.add_argument("--model-id", default=None)
+    attach_cache.add_argument("--device", default=None)
+    attach_cache.add_argument("--layer-mode", default=None, help="all, lower, middle, upper, or comma-separated indices")
+    attach_cache.add_argument("--capture-hidden", action="store_true")
+    attach_cache.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
+    attach_cache.set_defaults(func=cmd_attach_prompt_caches)
 
     log = sub.add_parser("log", help="Append a structured research-log entry")
     log.add_argument("--path", default="docs/RESEARCH_LOG.md")

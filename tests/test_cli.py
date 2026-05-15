@@ -99,3 +99,14 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--checkpoint-every" in out
     assert "--train-batch-size" in out
 
+
+def test_attach_prompt_caches_help_lists_source_records(capsys):
+    try:
+        main(["attach-prompt-caches", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--source-records" in out
+    assert "--layer-mode" in out
+    assert "--resume" in out
+

@@ -210,3 +210,159 @@ def run_prompt_cache_collection(
     report = render_report(run_dir, read_jsonl(record_path), payload)
     (run_dir / "report.md").write_text(report, encoding="utf-8")
     return payload
+
+
+def run_existing_prompt_record_cache_collection(
+    run_dir: Path,
+    source_records: Path,
+    model_id: str,
+    device_name: str = "auto",
+    layer_mode: str = "all",
+    capture_hidden: bool = False,
+    resume: bool = False,
+) -> dict[str, Any]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = run_dir / "caches"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    record_path = run_dir / "records.jsonl"
+    if not resume:
+        record_path.write_text("", encoding="utf-8")
+    elif not record_path.exists():
+        record_path.write_text("", encoding="utf-8")
+
+    source_rows = read_jsonl(source_records)
+    completed = _existing_task_ids(record_path) if resume else set()
+    device = choose_device(device_name)
+    model, tokenizer = load_model_and_tokenizer(model_id, device, local_files_only=True)
+    uses_chat_template = bool(getattr(tokenizer, "chat_template", None))
+
+    for idx, source in enumerate(source_rows):
+        task_id = str(source.get("task_id") or f"record_{idx:04d}")
+        if task_id in completed:
+            print(f"[{idx + 1}/{len(source_rows)}] {task_id}: skipped existing cache", flush=True)
+            continue
+        prompt_used = str(source.get("prompt") or "")
+        metadata = dict(source.get("metadata") or {})
+        baseline = str(metadata.get("prompt_baseline") or "existing")
+        protocol = str(metadata.get("prompt_protocol") or "existing_prompt_record")
+        start = time.perf_counter()
+        error = None
+        try:
+            (
+                cache,
+                selected_layers,
+                prompt_tokens,
+                hidden,
+                input_ids,
+                attention_mask,
+                last_logits,
+            ) = capture_prompt_cache(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt_used,
+                device=device,
+                layer_mode=layer_mode,
+                capture_hidden=capture_hidden,
+                use_chat_template=True,
+            )
+        except Exception as exc:
+            cache = None
+            selected_layers = []
+            prompt_tokens = int(source.get("prompt_tokens") or len(prompt_used.split()))
+            hidden = None
+            input_ids = None
+            attention_mask = None
+            last_logits = None
+            error = f"{type(exc).__name__}: {exc}"
+
+        cache_path = None
+        if cache is not None:
+            cache_path = cache_dir / f"{source.get('benchmark', 'task')}_{baseline}_{idx:04d}.pt"
+            parsed_answer = source.get("parsed_answer")
+            metadata_payload = CacheMetadata(
+                model_id=model_id,
+                tokenizer_id=getattr(tokenizer, "name_or_path", model_id),
+                dtype=str(cache[0][0].dtype) if cache else "unknown",
+                device=str(device),
+                layers=len(cache),
+                selected_layers=selected_layers,
+                selected_heads=None,
+                token_count=prompt_tokens,
+                cache_path=str(cache_path),
+                benchmark=source.get("benchmark"),
+                task_id=task_id,
+                prompt_baseline=baseline,
+                prompt_protocol=protocol,
+                target=source.get("target"),
+                parsed_answer=str(parsed_answer) if parsed_answer is not None else None,
+                correct=bool(source.get("correct")) and error is None,
+                generation_error=error,
+            )
+            save_cache_bundle(
+                cache_path,
+                cache,
+                metadata_payload,
+                hidden_states=hidden,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                last_logits=last_logits,
+                generation_token_ids=None,
+                generation_config={
+                    "max_new_tokens": source.get("generated_tokens"),
+                    "decoding_protocol": metadata.get("decoding_protocol"),
+                    "seed": source.get("seed"),
+                    "source_records": str(source_records),
+                    "attached_existing_output": True,
+                },
+            )
+
+        record = TrajectoryRecord(
+            run_id=run_dir.name,
+            benchmark=str(source.get("benchmark") or "unknown"),
+            task_id=task_id,
+            model_id=model_id,
+            seed=int(source.get("seed") or 0),
+            attempt_id=int(source.get("attempt_id") if source.get("attempt_id") is not None else idx),
+            prompt=prompt_used,
+            target=str(source.get("target") or ""),
+            output_text=str(source.get("output_text") or ""),
+            parsed_answer=source.get("parsed_answer"),
+            correct=bool(source.get("correct")) and error is None,
+            retry_index=int(source.get("retry_index") or 0),
+            cache_path=str(cache_path) if cache_path is not None else None,
+            latency_s=time.perf_counter() - start,
+            generated_tokens=source.get("generated_tokens"),
+            prompt_tokens=prompt_tokens,
+            metadata=metadata
+            | {
+                "cache_collection": True,
+                "cache_attached_from_existing_record": True,
+                "cache_source_records": str(source_records),
+                "cache_layer_mode": layer_mode,
+                "chat_template": uses_chat_template,
+                "local_files_only": True,
+                "generation_error": error,
+            },
+        )
+        append_jsonl(record_path, record)
+        print(
+            f"[{idx + 1}/{len(source_rows)}] {task_id}: "
+            f"source_correct={bool(source.get('correct'))} cache={record.cache_path is not None} error={error is not None}",
+            flush=True,
+        )
+
+    payload = evaluate_run(run_dir, baseline="prompt_cache_attached")
+    payload = load_metric_payload(run_dir)
+    rows = read_jsonl(record_path)
+    extra = payload.setdefault("extra", {})
+    extra["prompt_cache_attached_source_records"] = str(source_records)
+    extra["prompt_cache_attached_local_model"] = model_id
+    extra["prompt_cache_attached_cache_dir"] = str(cache_dir)
+    extra["prompt_cache_attached_source_total"] = len(rows)
+    extra["prompt_cache_attached_source_correct"] = sum(1 for row in rows if row.get("correct") is True)
+    extra["prompt_cache_attached_source_incorrect"] = sum(1 for row in rows if row.get("correct") is not True)
+    extra["prompt_cache_attached_resume"] = resume
+    write_json(run_dir / "metrics.json", payload)
+    report = render_report(run_dir, rows, payload)
+    (run_dir / "report.md").write_text(report, encoding="utf-8")
+    return payload
