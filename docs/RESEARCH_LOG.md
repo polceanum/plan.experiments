@@ -323,3 +323,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Keep the one-point latent-only contract. Next improve the learned latent itself with objectives that preserve rollout behaviour, such as multi-step teacher-forced logit matching, layer/head/value-aware weighting, or training on richer cache collections; treat VAE/KL as a separate generative-latent experiment rather than a patch for RAE reconstruction.
+
+## 2026-05-15 - oracle exact-vector replay check
+
+### Worked
+
+- Created an isolated oracle artifact for runs/qwen_cache_smoke_10 with reconstructed vectors set exactly to the original flattened prompt caches.
+- Exact-vector oracle under the rae_lstm behavior branch validated at 0.0 MSE, 10/10 valid caches, 8-step top-1 replay-fidelity 1.0, KL 0.0, and byte-for-byte identical full-budget outputs to original_cache.
+- Aligned-to-compact conversion was separately checked to round-trip original cache vectors exactly, with max_abs_error 0.0 and max_mse 0.0.
+
+### Did Not Work / Caveats
+
+- The learned high-capacity rae_lstm artifact still has mean reconstruction MSE 0.21915 and semantic free-running drift, so the remaining 0/10 behavior is not caused by reconstruction plumbing.
+
+### Left To Do
+
+- Drive the latent-only decoder toward much lower replay-critical error before testing other techniques; prioritize reconstruction fidelity and cache-sensitive diagnostics over local residual patchups.

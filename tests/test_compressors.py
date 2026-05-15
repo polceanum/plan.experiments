@@ -5,7 +5,7 @@ import torch
 from latent_kv.cache import CacheTuple, flatten_cache, load_cache_bundle, save_cache_bundle
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
-from latent_kv.compressors import ChunkedLSTMAutoEncoder, load_cache_matrix, run_compression
+from latent_kv.compressors import ChunkedLSTMAutoEncoder, _compact_reconstructions, load_cache_matrix, run_compression
 from latent_kv.schemas import CacheMetadata, TrajectoryRecord, append_jsonl
 from latent_kv.schemas import read_jsonl
 
@@ -251,3 +251,15 @@ def test_lstm_rae_latents_use_masked_normalized_inputs(tmp_path: Path):
     assert payload["lengths"] == [16, 12]
     assert payload["reconstructed"].shape[1] == 16
     assert torch.allclose(payload["latents"], expected)
+
+
+def test_aligned_cache_vectors_round_trip_to_original_compact_vectors(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+
+    cache_matrix = load_cache_matrix(tmp_path)
+    compact = _compact_reconstructions(cache_matrix.matrix, cache_matrix.shapes, cache_matrix.aligned_shapes)
+
+    for idx, cache_path in enumerate(cache_matrix.paths):
+        original = flatten_cache(load_cache_bundle(Path(cache_path))["cache"])
+        round_tripped = compact[idx, : cache_matrix.lengths[idx]]
+        assert torch.equal(round_tripped, original)
