@@ -223,9 +223,11 @@ def test_temporal_rae_compression_uses_token_time_axis(tmp_path: Path):
     assert artifact["input_representation"] == "temporal_full_cache_token_states"
     assert artifact["latent_encoding_input"] == "masked_normalized_temporal_token_cache"
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
-    assert training_rows[0]["method"] == "rae_temporal"
-    assert training_rows[0]["valid_tokens"] == 7
-    assert training_rows[0]["valid_values"] == 28
+    # Only check rows that have 'method' (skip startup event)
+    epoch_rows = [row for row in training_rows if "method" in row]
+    assert epoch_rows[0]["method"] == "rae_temporal"
+    assert epoch_rows[0]["valid_tokens"] == 7
+    assert epoch_rows[0]["valid_values"] == 28
     assert validation.records == 2
     assert validation.one_point_per_cache is True
     assert validation.valid_caches == 2
@@ -251,8 +253,9 @@ def test_temporal_rae_can_use_frozen_llm_prompt_state_gradients(tmp_path: Path, 
 
     assert artifact["frozen_llm_gradients"] is True
     assert artifact["frozen_llm_prompt_transition_kl_weight"] == 0.01
-    assert training_rows[0]["llm_gradients"] is True
-    assert "frozen_llm_prompt_transition_kl" in training_rows[0]["loss_components"]
+    epoch_rows = [row for row in training_rows if "llm_gradients" in row]
+    assert epoch_rows[0]["llm_gradients"] is True
+    assert "frozen_llm_prompt_transition_kl" in epoch_rows[0]["loss_components"]
 
 
 def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
@@ -303,7 +306,8 @@ def test_temporal_rae_can_train_in_mini_batches(tmp_path: Path):
 
     assert payload["latents"].shape == (2, 3)
     assert artifact["train_batch_size"] == 1
-    assert training_rows[0]["train_batch_size"] == 1
+    epoch_rows = [row for row in training_rows if "train_batch_size" in row]
+    assert epoch_rows[0]["train_batch_size"] == 1
 
 
 def test_temporal_rae_latents_use_masked_normalized_token_states(tmp_path: Path):
