@@ -561,107 +561,145 @@ def train_temporal_lstm_autoencoder(
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
     batch_size = int(train_batch_size) if train_batch_size and train_batch_size > 0 else int(normalized.shape[0])
     batch_size = max(1, min(batch_size, int(normalized.shape[0])))
+    import traceback
+    import sys
+    def log_exception_to_file(exc, path):
+        try:
+            with open(str(path).replace(".jsonl", "_error.log"), "a", encoding="utf-8") as f:
+                f.write(f"Exception at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                traceback.print_exc(file=f)
+                f.flush()
+        except Exception:
+            pass
+
     for epoch in range(1, epochs + 1):
-        reconstruction_numerator = 0.0
-        denominator_total = 0.0
-        llm_loss_total = 0.0
-        llm_loss_batches = 0
-        for batch_start in range(0, int(normalized.shape[0]), batch_size):
-            batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
-            batch_normalized = normalized[batch_start:batch_stop].to(training_device)
-            batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
-            batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
-            batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
-            opt.zero_grad(set_to_none=True)
-            reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
-            reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
-            llm_loss = reconstructed_norm.new_tensor(0.0)
-            if llm is not None and llm_loss_weight > 0:
-                reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
-                transition_losses = []
-                for local_idx, row in enumerate(reconstructed_sequence):
-                    row_idx = batch_start + local_idx
-                    aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
-                    compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
-                    reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
-                    predicted_logits = _prompt_state_transition_logits(
-                        llm_bundles[row_idx],
-                        reconstructed_cache,
-                        llm,
-                        training_device,
-                        llm_steps,
-                    )
-                    for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
-                        target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
-                        predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
-                        transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
-                if transition_losses:
-                    llm_loss = torch.stack(transition_losses).mean()
-            loss = reconstruction_loss + (llm_loss_weight * llm_loss)
-            loss.backward()
-            opt.step()
-            reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
-            denominator_total += float(batch_denominator.detach().item())
-            llm_loss_total += float(llm_loss.detach().item())
-            llm_loss_batches += 1
-        mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-        mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
-        mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss)
-        event = {
-            "elapsed_s": time.perf_counter() - start,
-            "epoch": epoch,
-            "epochs": epochs,
-            "hidden_dim": model.hidden_dim,
-            "num_layers": model.num_layers,
-            "loss": mean_loss,
-            "loss_components": {
-                "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
-                "frozen_llm_prompt_transition_kl": mean_llm_loss,
-            },
-            "method": "rae_temporal",
-            "masked_loss": True,
-            "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
-            "seq_len": model.max_tokens,
-            "token_dim": model.token_dim,
-            "valid_tokens": int(token_mask.sum().item()),
-            "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
-            "llm_loss_weight": llm_loss_weight,
-            "llm_steps": int(llm_steps),
-            "llm_gradients": llm is not None and llm_loss_weight > 0,
-            "weight_decay": weight_decay,
-            "train_batch_size": batch_size,
-        }
-        history.append(event)
-        if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
-            _append_training_event(progress_path, event)
-            print(
-                f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
-                f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
-                f"llm_kl={event['loss_components']['frozen_llm_prompt_transition_kl']:.6g} "
-                f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s",
-                flush=True,
-            )
-        if checkpoint_every > 0 and checkpoint_dir is not None and (epoch == 1 or epoch == epochs or epoch % checkpoint_every == 0):
-            checkpoint = {
-                "method": "rae_temporal",
+        try:
+            import psutil
+            reconstruction_numerator = 0.0
+            denominator_total = 0.0
+            llm_loss_total = 0.0
+            llm_loss_batches = 0
+            for batch_start in range(0, int(normalized.shape[0]), batch_size):
+                batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
+                batch_normalized = normalized[batch_start:batch_stop].to(training_device)
+                batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
+                batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
+                batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
+                opt.zero_grad(set_to_none=True)
+                reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
+                reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
+                llm_loss = reconstructed_norm.new_tensor(0.0)
+                if llm is not None and llm_loss_weight > 0:
+                    reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
+                    transition_losses = []
+                    for local_idx, row in enumerate(reconstructed_sequence):
+                        row_idx = batch_start + local_idx
+                        aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
+                        compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
+                        reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
+                        predicted_logits = _prompt_state_transition_logits(
+                            llm_bundles[row_idx],
+                            reconstructed_cache,
+                            llm,
+                            training_device,
+                            llm_steps,
+                        )
+                        for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
+                            target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
+                            predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
+                            transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
+                    if transition_losses:
+                        llm_loss = torch.stack(transition_losses).mean()
+                loss = reconstruction_loss + (llm_loss_weight * llm_loss)
+                loss.backward()
+                opt.step()
+                reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
+                denominator_total += float(batch_denominator.detach().item())
+                llm_loss_total += float(llm_loss.detach().item())
+                llm_loss_batches += 1
+            mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
+            mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
+            mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss)
+            # Log memory usage
+            try:
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                mem_gb = mem_info.rss / (1024 ** 3)
+            except Exception:
+                mem_gb = -1
+            event = {
+                "elapsed_s": time.perf_counter() - start,
                 "epoch": epoch,
                 "epochs": epochs,
-                "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-                "normalization_mean": mean.detach().cpu(),
-                "normalization_std": std.detach().cpu(),
-                "latent_dim": latent_dim,
                 "hidden_dim": model.hidden_dim,
                 "num_layers": model.num_layers,
+                "loss": mean_loss,
+                "loss_components": {
+                    "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
+                    "frozen_llm_prompt_transition_kl": mean_llm_loss,
+                },
+                "method": "rae_temporal",
+                "masked_loss": True,
+                "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
                 "seq_len": model.max_tokens,
                 "token_dim": model.token_dim,
-                "latest_event": event,
+                "valid_tokens": int(token_mask.sum().item()),
+                "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
                 "llm_loss_weight": llm_loss_weight,
                 "llm_steps": int(llm_steps),
+                "llm_gradients": llm is not None and llm_loss_weight > 0,
                 "weight_decay": weight_decay,
+                "train_batch_size": batch_size,
+                "memory_gb": mem_gb,
             }
-            checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
-            torch.save(checkpoint, checkpoint_path)
-            torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
+            history.append(event)
+            if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
+                _append_training_event(progress_path, event)
+                print(
+                    f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
+                    f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
+                    f"llm_kl={event['loss_components']['frozen_llm_prompt_transition_kl']:.6g} "
+                    f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s "
+                    f"mem={mem_gb:.2f}GB",
+                    flush=True,
+                )
+                sys.stdout.flush()
+            if checkpoint_every > 0 and checkpoint_dir is not None and (epoch == 1 or epoch == epochs or epoch % checkpoint_every == 0):
+                checkpoint = {
+                    "method": "rae_temporal",
+                    "epoch": epoch,
+                    "epochs": epochs,
+                    "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+                    "normalization_mean": mean.detach().cpu(),
+                    "normalization_std": std.detach().cpu(),
+                    "latent_dim": latent_dim,
+                    "hidden_dim": model.hidden_dim,
+                    "num_layers": model.num_layers,
+                    "seq_len": model.max_tokens,
+                    "token_dim": model.token_dim,
+                    "latest_event": event,
+                    "llm_loss_weight": llm_loss_weight,
+                    "llm_steps": int(llm_steps),
+                    "weight_decay": weight_decay,
+                }
+                checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
+                torch.save(checkpoint, checkpoint_path)
+                torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
+        except RuntimeError as exc:
+            # Catch OOM and other runtime errors, log and re-raise
+            log_exception_to_file(exc, progress_path)
+            print(f"[ERROR][epoch {epoch}] RuntimeError: {exc}", flush=True)
+            sys.stdout.flush()
+            if 'out of memory' in str(exc).lower():
+                print("[FATAL] Out of memory detected. Stopping training.", flush=True)
+                sys.stdout.flush()
+                break
+            raise
+        except Exception as exc:
+            log_exception_to_file(exc, progress_path)
+            print(f"[ERROR][epoch {epoch}] Exception: {exc}", flush=True)
+            sys.stdout.flush()
+            break
     with torch.no_grad():
         latent_batches = []
         reconstructed_batches = []
