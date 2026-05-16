@@ -299,12 +299,15 @@ def reconstruction_mse(original: torch.Tensor, reconstructed: torch.Tensor) -> f
     return float(torch.mean((original.float() - reconstructed.float()) ** 2).item())
 
 
+import os
 def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 @dataclass
@@ -493,10 +496,13 @@ def train_temporal_lstm_autoencoder(
     checkpoint_dir: Path | None = None,
     train_batch_size: int = 0,
 ) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
+    print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
     training_device = choose_device(llm_device_name) if llm_loss_weight > 0 else torch.device("cpu")
+    print(f"[rae_temporal] Device selected: {training_device}", flush=True)
     sequence = _temporal_matrix(x, aligned_shapes)
+    print(f"[rae_temporal] Temporal matrix shape: {sequence.shape}", flush=True)
     token_mask = _temporal_token_mask(shapes, aligned_shapes)
     feature_mask = token_mask.unsqueeze(-1).float()
     denominator = (feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
@@ -506,8 +512,10 @@ def train_temporal_lstm_autoencoder(
     variance = (((sequence - mean) * feature_mask) ** 2).sum(dim=(0, 1), keepdim=True) / counts
     std = variance.sqrt().clamp_min(1e-6)
     normalized = ((sequence - mean) / std) * feature_mask
+    print(f"[rae_temporal] Normalization complete. mean shape: {mean.shape}, std shape: {std.shape}", flush=True)
     mean_device = mean.to(training_device)
     std_device = std.to(training_device)
+    print("[rae_temporal] Constructing model...", flush=True)
     model = TemporalLSTMAutoEncoder(
         token_dim=sequence.shape[-1],
         max_tokens=sequence.shape[1],
@@ -515,10 +523,12 @@ def train_temporal_lstm_autoencoder(
         hidden_dim=hidden_dim,
         num_layers=num_layers,
     ).to(training_device)
+    print("[rae_temporal] Model constructed.", flush=True)
     llm = None
     llm_bundles: list[dict[str, Any]] = []
     target_transition_logits: list[list[torch.Tensor]] = []
     if llm_loss_weight > 0:
+        print("[rae_temporal] Loading LLM for frozen loss...", flush=True)
         if not cache_paths:
             raise ValueError("cache_paths are required when llm_loss_weight > 0")
         first_bundle = load_cache_bundle(Path(cache_paths[0]))
@@ -554,6 +564,7 @@ def train_temporal_lstm_autoencoder(
                         "attention_mask": bundle.get("attention_mask"),
                     }
                 )
+        print("[rae_temporal] LLM frozen loss targets loaded.", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
@@ -561,6 +572,24 @@ def train_temporal_lstm_autoencoder(
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
     batch_size = int(train_batch_size) if train_batch_size and train_batch_size > 0 else int(normalized.shape[0])
     batch_size = max(1, min(batch_size, int(normalized.shape[0])))
+    # Log startup event
+    startup_event = {
+        "event": "startup",
+        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+        "device": str(training_device),
+        "input_shape": list(x.shape),
+        "temporal_matrix_shape": list(sequence.shape),
+        "batch_size": batch_size,
+        "epochs": epochs,
+        "latent_dim": latent_dim,
+        "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
+        "llm_loss_weight": llm_loss_weight,
+        "llm_steps": llm_steps,
+        "note": "Startup event before first epoch."
+    }
+    _append_training_event(progress_path, startup_event)
+    print("[rae_temporal] Startup event logged. Beginning training loop...", flush=True)
     import traceback
     import sys
     def log_exception_to_file(exc, path):
