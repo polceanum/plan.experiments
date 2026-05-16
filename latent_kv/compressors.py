@@ -310,6 +310,15 @@ def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _current_memory_gb() -> float:
+    try:
+        import psutil
+
+        return float(psutil.Process().memory_info().rss / (1024 ** 3))
+    except Exception:
+        return -1.0
+
+
 @dataclass
 class RandomProjectionCompressor:
     input_dim: int
@@ -603,7 +612,6 @@ def train_temporal_lstm_autoencoder(
 
     for epoch in range(1, epochs + 1):
         try:
-            import psutil
             reconstruction_numerator = 0.0
             denominator_total = 0.0
             llm_loss_total = 0.0
@@ -649,13 +657,7 @@ def train_temporal_lstm_autoencoder(
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
             mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
             mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss)
-            # Log memory usage
-            try:
-                process = psutil.Process()
-                mem_info = process.memory_info()
-                mem_gb = mem_info.rss / (1024 ** 3)
-            except Exception:
-                mem_gb = -1
+            mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
                 "epoch": epoch,
