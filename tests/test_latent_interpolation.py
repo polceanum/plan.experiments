@@ -133,7 +133,7 @@ def _write_interpolation_run(tmp_path: Path) -> Path:
     torch.save(
         {
             "latents": torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
-            "checkpoint_metadata": {"checkpoint_path": str(checkpoint_path), "checkpoint_epoch": 1},
+            "checkpoint_metadata": {"checkpoint_path": str(checkpoint_path), "checkpoint_epoch": 1, "seq_len": 2},
             "annotations": rows,
         },
         analysis_dir / "checkpoint_latents.pt",

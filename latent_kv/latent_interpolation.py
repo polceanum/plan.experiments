@@ -16,7 +16,6 @@ from .benchmarks import verify_output
 from .cache import cache_shapes, choose_device, load_cache_bundle, load_model_and_tokenizer, unflatten_cache
 from .codec_validation import validate_cache_against_bundle
 from .compressors import (
-    _aligned_cache_shapes,
     _aligned_to_compact,
     _temporal_to_aligned_vector,
 )
@@ -76,16 +75,20 @@ def interpolate_latents(a: torch.Tensor, b: torch.Tensor, alpha: float) -> torch
 
 def _candidate_pairs(latents: torch.Tensor, annotations: list[dict[str, Any]], same_category: bool) -> list[tuple[float, int, int]]:
     correct_indices = [idx for idx, row in enumerate(annotations) if bool(row.get("correct"))]
-    normalized = torch.nn.functional.normalize(latents.float(), dim=-1)
+    if not correct_indices:
+        return []
+    index_tensor = torch.tensor(correct_indices, dtype=torch.long)
+    normalized = torch.nn.functional.normalize(latents.float()[index_tensor], dim=-1)
+    distances = 1.0 - (normalized @ normalized.T)
     candidates = []
     for pos, a_idx in enumerate(correct_indices):
         a_category = str(annotations[a_idx].get("primary_category"))
-        for b_idx in correct_indices[pos + 1 :]:
+        for next_pos, b_idx in enumerate(correct_indices[pos + 1 :], start=pos + 1):
             b_category = str(annotations[b_idx].get("primary_category"))
             is_same = a_category == b_category
             if is_same != same_category:
                 continue
-            distance = float(1.0 - torch.dot(normalized[a_idx], normalized[b_idx]).item())
+            distance = float(distances[pos, next_pos].item())
             candidates.append((distance, a_idx, b_idx))
     candidates.sort(key=lambda item: (item[0], item[1], item[2]))
     return candidates
@@ -200,6 +203,18 @@ def _decode_latent_to_cache(
     aligned_vector = _temporal_to_aligned_vector(sequence, aligned_shapes)
     compact_vector = _aligned_to_compact(aligned_vector, endpoint_shapes, aligned_shapes)
     return unflatten_cache(compact_vector, endpoint_shapes)
+
+
+def _aligned_shapes_for_checkpoint(base_shapes: list[Any], seq_len: int) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+    aligned = []
+    for key_shape, value_shape in base_shapes:
+        aligned_layer = []
+        for shape in (key_shape, value_shape):
+            shape_list = list(shape)
+            shape_list[-2] = int(seq_len)
+            aligned_layer.append(tuple(shape_list))
+        aligned.append((aligned_layer[0], aligned_layer[1]))
+    return aligned
 
 
 def _plot_interpolation_accuracy(rows: list[dict[str, Any]], output_dir: Path) -> str | None:
@@ -366,20 +381,22 @@ def run_latent_interpolation(
 
     pairs_selected = select_interpolation_pairs(latents, annotations, pairs=pairs, pair_mode=pair_mode)
 
-    shapes = []
-    bundles = []
-    for record in records:
-        bundle = load_cache_bundle(Path(str(record["cache_path"])))
-        bundles.append(bundle)
-        shapes.append(bundle.get("shapes") or cache_shapes(bundle["cache"]))
-    aligned_shapes = _aligned_cache_shapes(shapes)
-
     latent_device = choose_device(latent_device_name)
     model, checkpoint = _load_checkpoint_model(checkpoint_path)
     model.to(latent_device)
     model.eval()
     mean = checkpoint["normalization_mean"].to(latent_device)
     std = checkpoint["normalization_std"].to(latent_device)
+    seq_len = int(checkpoint.get("seq_len") or checkpoint_meta.get("seq_len") or mean.shape[-2])
+
+    selected_indices = sorted({idx for pair in pairs_selected for idx in (pair.a_index, pair.b_index)})
+    shapes_by_index: dict[int, list[Any]] = {}
+    for idx in selected_indices:
+        bundle = load_cache_bundle(Path(str(records[idx]["cache_path"])))
+        shapes_by_index[idx] = bundle.get("shapes") or cache_shapes(bundle["cache"])
+    if not shapes_by_index:
+        raise ValueError("No endpoint cache shapes found")
+    aligned_shapes = _aligned_shapes_for_checkpoint(next(iter(shapes_by_index.values())), seq_len)
 
     chosen_model = model_id or str(records[0].get("model_id"))
     replay_device = choose_device(replay_device_name)
@@ -406,7 +423,7 @@ def run_latent_interpolation(
                 ("a", pair.a_index, a_record, a_annotation, b_record),
                 ("b", pair.b_index, b_record, b_annotation, a_record),
             ]:
-                bundle = bundles[endpoint_index]
+                bundle = load_cache_bundle(Path(str(endpoint_record["cache_path"])))
                 cache_override = None
                 validation_payload = None
                 error = None
@@ -416,7 +433,7 @@ def run_latent_interpolation(
                 try:
                     cache_override = _decode_latent_to_cache(
                         z=z,
-                        endpoint_shapes=shapes[endpoint_index],
+                        endpoint_shapes=shapes_by_index[endpoint_index],
                         aligned_shapes=aligned_shapes,
                         model=model,
                         mean=mean,
