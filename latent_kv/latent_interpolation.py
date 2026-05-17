@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -94,11 +95,83 @@ def _candidate_pairs(latents: torch.Tensor, annotations: list[dict[str, Any]], s
     return candidates
 
 
+def _problem_text(prompt: str) -> str:
+    marker = "Solve the math problem. Give the final numeric answer."
+    if marker in prompt:
+        return prompt.split(marker, 1)[1].strip()
+    return prompt.strip()
+
+
+def _token_set(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 2}
+
+
+def _prompt_overlap(a_prompt: str, b_prompt: str) -> float:
+    a_tokens = _token_set(_problem_text(a_prompt))
+    b_tokens = _token_set(_problem_text(b_prompt))
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+
+
+def _select_candidates(
+    candidates: list[tuple[float, int, int]],
+    annotations: list[dict[str, Any]],
+    records: list[dict[str, Any]] | None,
+    wanted: int,
+    used: set[tuple[int, int]],
+    selection: str,
+    min_distance: float,
+    max_distance: float | None,
+    max_prompt_overlap: float,
+) -> list[tuple[float, int, int]]:
+    filtered = []
+    for distance, a_idx, b_idx in candidates:
+        key = (min(a_idx, b_idx), max(a_idx, b_idx))
+        if key in used or distance < min_distance:
+            continue
+        if max_distance is not None and distance > max_distance:
+            continue
+        if records is not None:
+            if str(records[a_idx].get("target")) == str(records[b_idx].get("target")):
+                continue
+            overlap = _prompt_overlap(str(records[a_idx].get("prompt") or ""), str(records[b_idx].get("prompt") or ""))
+            if overlap > max_prompt_overlap:
+                continue
+        filtered.append((distance, a_idx, b_idx))
+    if selection == "nearest":
+        return filtered[:wanted]
+    if selection != "spread":
+        raise ValueError("selection must be nearest or spread")
+    if len(filtered) <= wanted:
+        return filtered
+    positions = torch.linspace(0, len(filtered) - 1, steps=wanted).round().long().tolist()
+    chosen = []
+    seen_positions = set()
+    for position in positions:
+        if position in seen_positions:
+            continue
+        seen_positions.add(position)
+        chosen.append(filtered[int(position)])
+    cursor = 0
+    while len(chosen) < wanted and cursor < len(filtered):
+        if cursor not in seen_positions:
+            chosen.append(filtered[cursor])
+        cursor += 1
+    chosen.sort(key=lambda item: (item[0], item[1], item[2]))
+    return chosen[:wanted]
+
+
 def select_interpolation_pairs(
     latents: torch.Tensor,
     annotations: list[dict[str, Any]],
     pairs: int,
     pair_mode: str = "mixed",
+    records: list[dict[str, Any]] | None = None,
+    selection: str = "nearest",
+    min_distance: float = 0.0,
+    max_distance: float | None = None,
+    max_prompt_overlap: float = 0.65,
 ) -> list[InterpolationPair]:
     pair_mode = pair_mode.lower()
     if pair_mode not in {"same_category", "cross_category", "mixed"}:
@@ -122,7 +195,18 @@ def select_interpolation_pairs(
         "cross_category": _candidate_pairs(latents, annotations, same_category=False),
     }
     for mode, wanted in modes:
-        for distance, a_idx, b_idx in candidate_cache[mode]:
+        selected_candidates = _select_candidates(
+            candidate_cache[mode],
+            annotations=annotations,
+            records=records,
+            wanted=wanted,
+            used=used,
+            selection=selection,
+            min_distance=min_distance,
+            max_distance=max_distance,
+            max_prompt_overlap=max_prompt_overlap,
+        )
+        for distance, a_idx, b_idx in selected_candidates:
             key = (min(a_idx, b_idx), max(a_idx, b_idx))
             if key in used:
                 continue
@@ -327,6 +411,71 @@ def _render_sequences(pair_rows: list[dict[str, Any]], replay_rows: list[dict[st
     return "\n".join(chunks)
 
 
+def _excerpt(text: Any, limit: int = 420) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _render_inspection_report(pair_rows: list[dict[str, Any]], replay_rows: list[dict[str, Any]]) -> str:
+    rows_by_pair: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in replay_rows:
+        rows_by_pair[str(row["pair_id"])].append(row)
+    chunks = [
+        "# Latent Interpolation Inspection Report",
+        "",
+        "This file is optimized for human inspection. The JSON blocks are stable machine-readable anchors.",
+        "",
+    ]
+    for pair in pair_rows:
+        pair_id = str(pair["pair_id"])
+        metadata = {
+            "pair_id": pair_id,
+            "pair_type": pair["pair_type"],
+            "distance": pair["distance"],
+            "a_task_id": pair["a"]["task_id"],
+            "b_task_id": pair["b"]["task_id"],
+            "a_primary_category": pair["a"]["primary_category"],
+            "b_primary_category": pair["b"]["primary_category"],
+            "a_target": pair["a"]["target"],
+            "b_target": pair["b"]["target"],
+        }
+        chunks.extend(
+            [
+                f"## {pair_id}: {pair['a']['task_id']} -> {pair['b']['task_id']}",
+                "",
+                "```json",
+                json.dumps(metadata, sort_keys=True),
+                "```",
+                "",
+                f"**A problem** ({pair['a']['primary_category']}, target `{pair['a']['target']}`): {_excerpt(_problem_text(pair['a']['prompt']), 520)}",
+                "",
+                f"**A original**: {_excerpt(pair['a']['output_text'], 520)}",
+                "",
+                f"**B problem** ({pair['b']['primary_category']}, target `{pair['b']['target']}`): {_excerpt(_problem_text(pair['b']['prompt']), 520)}",
+                "",
+                f"**B original**: {_excerpt(pair['b']['output_text'], 520)}",
+                "",
+                "| alpha | A-context decoded continuation | B-context decoded continuation |",
+                "|---:|---|---|",
+            ]
+        )
+        a_rows = {float(row["alpha"]): row for row in rows_by_pair[pair_id] if row["replay_context"] == "a"}
+        b_rows = {float(row["alpha"]): row for row in rows_by_pair[pair_id] if row["replay_context"] == "b"}
+        for alpha in sorted(set(a_rows) | set(b_rows)):
+            a_row = a_rows.get(alpha, {})
+            b_row = b_rows.get(alpha, {})
+            a_text = _excerpt(a_row.get("decoded_output"), 260).replace("|", "\\|")
+            b_text = _excerpt(b_row.get("decoded_output"), 260).replace("|", "\\|")
+            chunks.append(
+                f"| {alpha:.3f} | parsed `{a_row.get('decoded_parsed_answer')}` correct `{a_row.get('decoded_correct_for_endpoint')}`<br>{a_text} | "
+                f"parsed `{b_row.get('decoded_parsed_answer')}` correct `{b_row.get('decoded_correct_for_endpoint')}`<br>{b_text} |"
+            )
+        chunks.append("")
+    return "\n".join(chunks)
+
+
 def _accuracy_by_context_alpha(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[bool]] = defaultdict(list)
     for row in rows:
@@ -351,6 +500,10 @@ def run_latent_interpolation(
     model_id: str | None = None,
     max_new_tokens: int | None = None,
     progress_every: int = 25,
+    selection: str = "nearest",
+    min_distance: float = 0.0,
+    max_distance: float | None = None,
+    max_prompt_overlap: float = 0.65,
 ) -> InterpolationSummary:
     analysis_dir = analysis_dir or run_dir / "analysis"
     latents_path = analysis_dir / "checkpoint_latents.pt"
@@ -379,7 +532,17 @@ def run_latent_interpolation(
     output_dir = output_dir or analysis_dir / f"interpolations_epoch_{checkpoint_epoch or 'unknown'}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pairs_selected = select_interpolation_pairs(latents, annotations, pairs=pairs, pair_mode=pair_mode)
+    pairs_selected = select_interpolation_pairs(
+        latents,
+        annotations,
+        pairs=pairs,
+        pair_mode=pair_mode,
+        records=records,
+        selection=selection,
+        min_distance=min_distance,
+        max_distance=max_distance,
+        max_prompt_overlap=max_prompt_overlap,
+    )
 
     latent_device = choose_device(latent_device_name)
     model, checkpoint = _load_checkpoint_model(checkpoint_path)
@@ -495,15 +658,18 @@ def run_latent_interpolation(
     pairs_path = output_dir / "interpolation_pairs.jsonl"
     replays_path = output_dir / "interpolation_replays.jsonl"
     sequence_path = output_dir / "interpolation_sequences.md"
+    inspection_path = output_dir / "interpolation_inspection.md"
     _jsonl_write(pairs_path, pair_rows)
     _jsonl_write(replays_path, replay_rows)
     sequence_path.write_text(_render_sequences(pair_rows, replay_rows), encoding="utf-8")
+    inspection_path.write_text(_render_inspection_report(pair_rows, replay_rows), encoding="utf-8")
     plot_path = _plot_interpolation_accuracy(replay_rows, output_dir)
 
     artifacts = {
         "interpolation_pairs.jsonl": str(pairs_path),
         "interpolation_replays.jsonl": str(replays_path),
         "interpolation_sequences.md": str(sequence_path),
+        "interpolation_inspection.md": str(inspection_path),
     }
     if plot_path is not None:
         artifacts["interpolation_accuracy_by_alpha.png"] = plot_path

@@ -557,6 +557,10 @@ def cmd_latent_interpolate(args: argparse.Namespace) -> int:
         model_id=args.model_id,
         max_new_tokens=args.max_new_tokens,
         progress_every=args.progress_every,
+        selection=args.selection,
+        min_distance=args.min_distance,
+        max_distance=args.max_distance,
+        max_prompt_overlap=args.max_prompt_overlap,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -747,6 +751,10 @@ def build_parser() -> argparse.ArgumentParser:
     latent_interpolate.add_argument("--model-id", default=None, help="Local model for replay. Defaults to source record model_id.")
     latent_interpolate.add_argument("--max-new-tokens", type=int, default=None, help="Replay token budget. Defaults to endpoint source generated_tokens.")
     latent_interpolate.add_argument("--progress-every", type=int, default=25, help="Print replay progress every N rows; 0 disables progress.")
+    latent_interpolate.add_argument("--selection", default="nearest", choices=["nearest", "spread"], help="Pair selection strategy within each pair-mode bucket.")
+    latent_interpolate.add_argument("--min-distance", type=float, default=0.0, help="Minimum cosine distance between endpoints.")
+    latent_interpolate.add_argument("--max-distance", type=float, default=None, help="Optional maximum cosine distance between endpoints.")
+    latent_interpolate.add_argument("--max-prompt-overlap", type=float, default=0.65, help="Maximum endpoint problem token Jaccard overlap.")
     latent_interpolate.set_defaults(func=cmd_latent_interpolate)
 
     corruption = sub.add_parser(

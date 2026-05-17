@@ -55,6 +55,45 @@ def test_select_interpolation_pairs_filters_correct_and_mixed_modes():
     assert len({tuple(sorted((pair.a_index, pair.b_index))) for pair in pairs}) == len(pairs)
 
 
+def test_select_interpolation_pairs_can_spread_and_filter_near_duplicates():
+    latents = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.4, 0.6],
+            [0.0, 1.0],
+        ]
+    )
+    annotations = [
+        {"task_id": "a", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "b", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "c", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "d", "correct": True, "primary_category": "money_price_profit"},
+    ]
+    records = [
+        {"prompt": "Solve the math problem. Give the final numeric answer. Apples cost 1 dollar.", "target": "1"},
+        {"prompt": "Solve the math problem. Give the final numeric answer. Apples cost 1 dollar.", "target": "1"},
+        {"prompt": "Solve the math problem. Give the final numeric answer. A train travels for several hours.", "target": "2"},
+        {"prompt": "Solve the math problem. Give the final numeric answer. A bakery sells many cakes.", "target": "3"},
+    ]
+
+    pairs = select_interpolation_pairs(
+        latents,
+        annotations,
+        records=records,
+        pairs=1,
+        pair_mode="same_category",
+        selection="spread",
+        min_distance=0.05,
+        max_distance=1.5,
+        max_prompt_overlap=0.5,
+    )
+
+    assert pairs[0].distance >= 0.05
+    assert pairs[0].distance <= 1.5
+    assert {pairs[0].a_task_id, pairs[0].b_task_id} != {"a", "b"}
+
+
 class _FakeRAE(torch.nn.Module):
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         batch = int(z.shape[0])
@@ -95,8 +134,8 @@ def _write_interpolation_run(tmp_path: Path) -> Path:
                 model_id="fake-model",
                 seed=0,
                 attempt_id=0,
-                prompt=f"Prompt {idx}",
-                target="1",
+                prompt=f"Solve the math problem. Give the final numeric answer. {'Apples cost money' if idx == 0 else 'Trains travel daily'}",
+                target=str(idx + 1),
                 output_text="The answer is 1",
                 parsed_answer="1",
                 correct=True,
@@ -177,3 +216,4 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "endpoint_prompt" in rows
     assert "decoded_output" in rows
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_sequences.md").exists()
+    assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").exists()

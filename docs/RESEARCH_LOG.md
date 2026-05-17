@@ -552,3 +552,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run and inspect the first 50-pair mixed interpolation sweep, then compare decoded transition outputs by same-category versus cross-category pairs.
+
+## 2026-05-17 - Representative latent interpolation inspection sweep
+
+### Worked
+
+- Added spread/min-distance/max-distance pair selection, target/prompt-overlap filtering, and a compact interpolation_inspection.md report; generated a 6-pair representative epoch-10 sweep with 7 alpha points and 64-token CPU continuations.
+
+### Did Not Work / Caveats
+
+- Endpoint-target accuracy remains zero; decoded continuations are readable but often generic or semantically drifted, so this is qualitative evidence that epoch-10 latents are not yet preserving endpoint task plans under interpolation.
+
+### Left To Do
+
+- Rerun the representative sweep on later checkpoints after loss improves, and compare whether endpoint-alpha decodes become more task-specific before scaling to more pairs.

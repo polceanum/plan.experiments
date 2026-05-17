@@ -97,6 +97,9 @@ def test_latent_interpolate_help_lists_replay_controls(capsys):
     assert "--pair-mode" in out
     assert "--replay-device" in out
     assert "--max-new-tokens" in out
+    assert "--selection" in out
+    assert "--min-distance" in out
+    assert "--max-distance" in out
 
 
 def test_corruption_sensitivity_help_lists_alpha(capsys):
