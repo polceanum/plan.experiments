@@ -9,6 +9,7 @@ from latent_kv.latent_interpolation import (
     interpolate_latents,
     parse_alphas,
     run_latent_interpolation,
+    run_reconstruction_scan,
     select_interpolation_pairs,
 )
 from latent_kv.schemas import CacheMetadata, TrajectoryRecord, append_jsonl
@@ -223,3 +224,36 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "Endpoint B solved plan" in report
     solved_report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection_solved_reconstructions.md")
     assert solved_report.exists()
+
+
+def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, monkeypatch):
+    run_dir = _write_interpolation_run(tmp_path)
+    checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+
+    monkeypatch.setattr(
+        interpolation,
+        "_load_checkpoint_model",
+        lambda path: (
+            _FakeRAE(),
+            {
+                "normalization_mean": torch.zeros(1, 1, 2),
+                "normalization_std": torch.ones(1, 1, 2),
+            },
+        ),
+    )
+    monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
+    monkeypatch.setattr(interpolation, "greedy_continue_from_loaded_bundle", lambda **kwargs: "The answer is 1")
+
+    summary = run_reconstruction_scan(
+        run_dir,
+        checkpoint_path=checkpoint,
+        replay_device_name="cpu",
+        max_new_tokens=4,
+        progress_every=0,
+    )
+
+    assert summary.scanned == 2
+    assert summary.solved_reconstructions == 1
+    rows = (run_dir / "analysis" / "reconstruction_scan_epoch_1" / "reconstruction_replays.jsonl").read_text(encoding="utf-8")
+    assert "decoded_correct" in rows
+    assert "original_output" in rows

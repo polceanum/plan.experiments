@@ -23,7 +23,7 @@ from .corruption_sensitivity import score_corruption_sensitivity
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .latent_analysis import run_latent_analysis
-from .latent_interpolation import parse_alphas, run_latent_interpolation
+from .latent_interpolation import parse_alphas, run_latent_interpolation, run_reconstruction_scan
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
@@ -566,6 +566,25 @@ def cmd_latent_interpolate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_latent_reconstruction_scan(args: argparse.Namespace) -> int:
+    import json
+
+    summary = run_reconstruction_scan(
+        run_dir=Path(args.run),
+        analysis_dir=Path(args.analysis_dir) if args.analysis_dir else None,
+        checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        latent_device_name=args.device,
+        replay_device_name=args.replay_device,
+        model_id=args.model_id,
+        max_new_tokens=args.max_new_tokens,
+        limit=args.limit,
+        progress_every=args.progress_every,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_corruption_sensitivity(args: argparse.Namespace) -> int:
     import json
 
@@ -756,6 +775,22 @@ def build_parser() -> argparse.ArgumentParser:
     latent_interpolate.add_argument("--max-distance", type=float, default=None, help="Optional maximum cosine distance between endpoints.")
     latent_interpolate.add_argument("--max-prompt-overlap", type=float, default=0.65, help="Maximum endpoint problem token Jaccard overlap.")
     latent_interpolate.set_defaults(func=cmd_latent_interpolate)
+
+    reconstruction_scan = sub.add_parser(
+        "latent-reconstruction-scan",
+        help="Replay decoded endpoint reconstructions for all solved source tasks",
+    )
+    reconstruction_scan.add_argument("--run", required=True)
+    reconstruction_scan.add_argument("--analysis-dir", default=None, help="Directory containing checkpoint_latents.pt and task_categories.jsonl.")
+    reconstruction_scan.add_argument("--checkpoint", default=None, help="Checkpoint used to produce checkpoint_latents.pt; defaults to latest complete numbered checkpoint.")
+    reconstruction_scan.add_argument("--output-dir", default=None, help="Scan artifact directory. Defaults to <analysis-dir>/reconstruction_scan_epoch_<N>.")
+    reconstruction_scan.add_argument("--device", default="cpu", help="Device for RAE latent decoding.")
+    reconstruction_scan.add_argument("--replay-device", default="auto", help="Device for local LLM replay.")
+    reconstruction_scan.add_argument("--model-id", default=None, help="Local model for replay. Defaults to source record model_id.")
+    reconstruction_scan.add_argument("--max-new-tokens", type=int, default=128)
+    reconstruction_scan.add_argument("--limit", type=int, default=None, help="Optional solved-source endpoint limit for smoke scans.")
+    reconstruction_scan.add_argument("--progress-every", type=int, default=25, help="Print scan progress every N endpoints; 0 disables progress.")
+    reconstruction_scan.set_defaults(func=cmd_latent_reconstruction_scan)
 
     corruption = sub.add_parser(
         "corruption-sensitivity",

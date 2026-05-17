@@ -58,6 +58,20 @@ class InterpolationSummary:
     artifacts: dict[str, str]
 
 
+@dataclass(frozen=True)
+class ReconstructionScanSummary:
+    run_dir: str
+    analysis_dir: str
+    output_dir: str
+    checkpoint_path: str
+    checkpoint_epoch: int | None
+    scanned: int
+    solved_reconstructions: int
+    replay_failures: int
+    max_new_tokens: int
+    artifacts: dict[str, str]
+
+
 def parse_alphas(value: str | None) -> list[float]:
     if value is None or not value.strip():
         return list(DEFAULT_ALPHAS)
@@ -549,6 +563,153 @@ def _accuracy_by_context_alpha(rows: list[dict[str, Any]]) -> dict[str, dict[str
     }
 
 
+def _load_interpolation_inputs(
+    run_dir: Path,
+    analysis_dir: Path | None,
+    checkpoint_path: Path | None,
+) -> tuple[Path, Path, dict[str, Any], torch.Tensor, list[dict[str, Any]], list[dict[str, Any]], int | None]:
+    analysis_dir = analysis_dir or run_dir / "analysis"
+    latents_path = analysis_dir / "checkpoint_latents.pt"
+    categories_path = analysis_dir / "task_categories.jsonl"
+    if not latents_path.exists():
+        raise FileNotFoundError(f"Missing latent analysis artifact: {latents_path}")
+    if not categories_path.exists():
+        raise FileNotFoundError(f"Missing category artifact: {categories_path}")
+    latent_payload = torch.load(latents_path, map_location="cpu")
+    latents = latent_payload["latents"].float()
+    annotations = read_jsonl(categories_path)
+    records = read_jsonl(run_dir / "records.jsonl")
+    if len(records) != len(annotations) or len(records) != int(latents.shape[0]):
+        raise ValueError("records, annotations, and latents must have matching row counts")
+    checkpoint_path = checkpoint_path or latest_complete_checkpoint(run_dir, method="rae_temporal")
+    checkpoint_meta = latent_payload.get("checkpoint_metadata") or {}
+    if str(checkpoint_meta.get("checkpoint_path") or "") != str(checkpoint_path):
+        raise ValueError(
+            "checkpoint_latents.pt was produced with a different checkpoint. "
+            "Run latent-analysis for the checkpoint you want to use, or pass that exact checkpoint."
+        )
+    checkpoint_epoch = int(checkpoint_meta.get("checkpoint_epoch")) if checkpoint_meta.get("checkpoint_epoch") is not None else None
+    return analysis_dir, checkpoint_path, checkpoint_meta, latents, annotations, records, checkpoint_epoch
+
+
+def run_reconstruction_scan(
+    run_dir: Path,
+    analysis_dir: Path | None = None,
+    checkpoint_path: Path | None = None,
+    output_dir: Path | None = None,
+    latent_device_name: str = "cpu",
+    replay_device_name: str = "auto",
+    model_id: str | None = None,
+    max_new_tokens: int = 128,
+    limit: int | None = None,
+    progress_every: int = 25,
+) -> ReconstructionScanSummary:
+    analysis_dir, checkpoint_path, checkpoint_meta, latents, annotations, records, checkpoint_epoch = _load_interpolation_inputs(
+        run_dir,
+        analysis_dir,
+        checkpoint_path,
+    )
+    output_dir = output_dir or analysis_dir / f"reconstruction_scan_epoch_{checkpoint_epoch or 'unknown'}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    indices = [idx for idx, row in enumerate(annotations) if bool(row.get("correct"))]
+    if limit is not None:
+        indices = indices[: int(limit)]
+
+    latent_device = choose_device(latent_device_name)
+    model, checkpoint = _load_checkpoint_model(checkpoint_path)
+    model.to(latent_device)
+    model.eval()
+    mean = checkpoint["normalization_mean"].to(latent_device)
+    std = checkpoint["normalization_std"].to(latent_device)
+    seq_len = int(checkpoint.get("seq_len") or checkpoint_meta.get("seq_len") or mean.shape[-2])
+
+    chosen_model = model_id or str(records[0].get("model_id"))
+    replay_device = choose_device(replay_device_name)
+    replay_model, tokenizer = load_model_and_tokenizer(chosen_model, replay_device, local_files_only=True)
+
+    rows: list[dict[str, Any]] = []
+    total = len(indices)
+    for scan_index, idx in enumerate(indices, start=1):
+        record = records[idx]
+        annotation = annotations[idx]
+        bundle = load_cache_bundle(Path(str(record["cache_path"])))
+        endpoint_shapes = bundle.get("shapes") or cache_shapes(bundle["cache"])
+        aligned_shapes = _aligned_shapes_for_checkpoint(endpoint_shapes, seq_len)
+        error = None
+        validation_payload = None
+        output = ""
+        parsed = None
+        correct = False
+        try:
+            cache_override = _decode_latent_to_cache(
+                z=latents[idx].to(latent_device),
+                endpoint_shapes=endpoint_shapes,
+                aligned_shapes=aligned_shapes,
+                model=model,
+                mean=mean,
+                std=std,
+            )
+            validation = validate_cache_against_bundle(cache_override, bundle)
+            validation_payload = asdict(validation)
+            if not validation.valid:
+                raise ValueError(";".join(validation.errors))
+            output = greedy_continue_from_loaded_bundle(
+                bundle=bundle,
+                model=replay_model,
+                tokenizer=tokenizer,
+                device=replay_device,
+                max_new_tokens=int(max_new_tokens),
+                cache_override=cache_override,
+            )
+            parsed, correct = verify_output(output, _record_to_example(record))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        rows.append(
+            {
+                "index": idx,
+                "task_id": record.get("task_id"),
+                "prompt": record.get("prompt"),
+                "target": record.get("target"),
+                "original_output": record.get("output_text"),
+                "original_parsed_answer": record.get("parsed_answer"),
+                "original_correct": bool(record.get("correct")),
+                "primary_category": annotation.get("primary_category"),
+                "categories": annotation.get("categories"),
+                "decoded_output": output,
+                "decoded_parsed_answer": parsed,
+                "decoded_correct": bool(correct) and error is None,
+                "cache_validation": validation_payload,
+                "replay_error": error,
+                "model_id": chosen_model,
+                "max_new_tokens": int(max_new_tokens),
+            }
+        )
+        if progress_every > 0 and (scan_index == 1 or scan_index == total or scan_index % progress_every == 0):
+            print(
+                f"[latent-reconstruction-scan] {scan_index}/{total} task={record.get('task_id')} correct={bool(correct) and error is None}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    rows_path = output_dir / "reconstruction_replays.jsonl"
+    _jsonl_write(rows_path, rows)
+    summary = ReconstructionScanSummary(
+        run_dir=str(run_dir),
+        analysis_dir=str(analysis_dir),
+        output_dir=str(output_dir),
+        checkpoint_path=str(checkpoint_path),
+        checkpoint_epoch=checkpoint_epoch,
+        scanned=len(rows),
+        solved_reconstructions=sum(1 for row in rows if row.get("decoded_correct")),
+        replay_failures=sum(1 for row in rows if row.get("replay_error")),
+        max_new_tokens=int(max_new_tokens),
+        artifacts={"reconstruction_replays.jsonl": str(rows_path)},
+    )
+    write_json(output_dir / "reconstruction_scan_summary.json", asdict(summary))
+    return summary
+
+
 def run_latent_interpolation(
     run_dir: Path,
     analysis_dir: Path | None = None,
@@ -567,30 +728,12 @@ def run_latent_interpolation(
     max_distance: float | None = None,
     max_prompt_overlap: float = 0.65,
 ) -> InterpolationSummary:
-    analysis_dir = analysis_dir or run_dir / "analysis"
-    latents_path = analysis_dir / "checkpoint_latents.pt"
-    categories_path = analysis_dir / "task_categories.jsonl"
-    if not latents_path.exists():
-        raise FileNotFoundError(f"Missing latent analysis artifact: {latents_path}")
-    if not categories_path.exists():
-        raise FileNotFoundError(f"Missing category artifact: {categories_path}")
-
-    latent_payload = torch.load(latents_path, map_location="cpu")
-    latents = latent_payload["latents"].float()
-    annotations = read_jsonl(categories_path)
-    records = read_jsonl(run_dir / "records.jsonl")
-    if len(records) != len(annotations) or len(records) != int(latents.shape[0]):
-        raise ValueError("records, annotations, and latents must have matching row counts")
-
-    checkpoint_path = checkpoint_path or latest_complete_checkpoint(run_dir, method="rae_temporal")
-    checkpoint_meta = latent_payload.get("checkpoint_metadata") or {}
-    if str(checkpoint_meta.get("checkpoint_path") or "") != str(checkpoint_path):
-        raise ValueError(
-            "checkpoint_latents.pt was produced with a different checkpoint. "
-            "Run latent-analysis for the checkpoint you want to interpolate, or pass that exact checkpoint."
-        )
+    analysis_dir, checkpoint_path, checkpoint_meta, latents, annotations, records, checkpoint_epoch = _load_interpolation_inputs(
+        run_dir,
+        analysis_dir,
+        checkpoint_path,
+    )
     alphas = alphas or list(DEFAULT_ALPHAS)
-    checkpoint_epoch = int(checkpoint_meta.get("checkpoint_epoch")) if checkpoint_meta.get("checkpoint_epoch") is not None else None
     output_dir = output_dir or analysis_dir / f"interpolations_epoch_{checkpoint_epoch or 'unknown'}"
     output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -102,6 +102,18 @@ def test_latent_interpolate_help_lists_replay_controls(capsys):
     assert "--max-distance" in out
 
 
+def test_latent_reconstruction_scan_help_lists_controls(capsys):
+    try:
+        main(["latent-reconstruction-scan", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--analysis-dir" in out
+    assert "--replay-device" in out
+    assert "--max-new-tokens" in out
+    assert "--limit" in out
+
+
 def test_corruption_sensitivity_help_lists_alpha(capsys):
     try:
         main(["corruption-sensitivity", "--help"])
