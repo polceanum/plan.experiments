@@ -524,3 +524,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Add checkpoint restore support for rae_temporal or rerun a shorter feasibility schedule first; consider reducing llm_steps, training on a success/failure slice, or using denser early logging before attempting another long full-cache run.
+
+## 2026-05-17 - Epoch-10 temporal RAE latent category PCA analysis
+
+### Worked
+
+- Added reusable latent-analysis CLI utilities; generated category annotations, checkpoint latents, PCA CSV, and PNG plots for 1,319 Qwen GSM8K CoT cache records from rae_temporal epoch 10.
+
+### Did Not Work / Caveats
+
+- Initial extractor materialized the full cache matrix and used too much CPU RAM; replaced it with batch streaming and added progress logging. Category labels remain heuristic exploratory annotations, not benchmark ground truth.
+
+### Left To Do
+
+- Inspect PCA plots by correctness/category, compare later checkpoints against epoch 10, and consider a stronger manual or local-LLM category audit for ambiguous GSM8K prompts.

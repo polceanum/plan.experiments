@@ -22,6 +22,7 @@ from .compressors import run_compression
 from .corruption_sensitivity import score_corruption_sensitivity
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
+from .latent_analysis import run_latent_analysis
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
@@ -524,6 +525,21 @@ def cmd_training_curve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_latent_analysis(args: argparse.Namespace) -> int:
+    import json
+
+    summary = run_latent_analysis(
+        run_dir=Path(args.run),
+        method=args.method,
+        checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        batch_size=args.batch_size,
+        progress_every_batches=args.progress_every_batches,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_corruption_sensitivity(args: argparse.Namespace) -> int:
     import json
 
@@ -680,6 +696,18 @@ def build_parser() -> argparse.ArgumentParser:
     training_curve.add_argument("--run", required=True)
     training_curve.add_argument("--method", required=True, help="Learned codec method, e.g. autoencoder or rae_temporal.")
     training_curve.set_defaults(func=cmd_training_curve)
+
+    latent_analysis = sub.add_parser(
+        "latent-analysis",
+        help="Annotate tasks, extract checkpoint latents, and write PCA plots",
+    )
+    latent_analysis.add_argument("--run", required=True)
+    latent_analysis.add_argument("--method", default="rae_temporal", help="Checkpoint method name, e.g. rae_temporal.")
+    latent_analysis.add_argument("--checkpoint", default=None, help="Explicit checkpoint path. Defaults to latest complete numbered checkpoint.")
+    latent_analysis.add_argument("--output-dir", default=None, help="Analysis artifact directory. Defaults to <run>/analysis.")
+    latent_analysis.add_argument("--batch-size", type=int, default=8, help="Latent extraction batch size.")
+    latent_analysis.add_argument("--progress-every-batches", type=int, default=50, help="Print CPU latent extraction progress every N batches; 0 disables progress.")
+    latent_analysis.set_defaults(func=cmd_latent_analysis)
 
     corruption = sub.add_parser(
         "corruption-sensitivity",

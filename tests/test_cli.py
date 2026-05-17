@@ -73,6 +73,19 @@ def test_training_curve_help_lists_method(capsys):
     assert "autoencoder" in out
 
 
+def test_latent_analysis_help_lists_outputs(capsys):
+    try:
+        main(["latent-analysis", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--checkpoint" in out
+    assert "--output-dir" in out
+    assert "--batch-size" in out
+    assert "--progress-every-batches" in out
+    assert "rae_temporal" in out
+
+
 def test_corruption_sensitivity_help_lists_alpha(capsys):
     try:
         main(["corruption-sensitivity", "--help"])
