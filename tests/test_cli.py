@@ -23,6 +23,7 @@ def test_prompt_baseline_help_lists_tiers(capsys):
     out = capsys.readouterr().out
     assert "--baseline-tier" in out
     assert "--resume" in out
+    assert "--chunk-size" in out
     assert "smoke" in out
     assert "full" in out
 
@@ -97,6 +98,7 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--weight-decay" in out
     assert "--log-every" in out
     assert "--checkpoint-every" in out
+    assert "--heartbeat-every-batches" in out
     assert "--train-batch-size" in out
 
 
@@ -109,4 +111,3 @@ def test_attach_prompt_caches_help_lists_source_records(capsys):
     assert "--source-records" in out
     assert "--layer-mode" in out
     assert "--resume" in out
-

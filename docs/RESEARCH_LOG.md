@@ -510,3 +510,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Try a more targeted fidelity objective before another long scaling run: more prompt-transition positions, layer/head/value-weighted reconstruction, or a staged MSE-to-LLM-loss schedule; keep behavioural decoded-cache accuracy as the headline metric.
+
+## 2026-05-16 - Interrupted full Qwen CoT temporal RAE feasibility run
+
+### Worked
+
+- Launched temporal RAE training on runs/qwen_cache_cot_full_attached with 1,319 attached CoT cache records, latent_dim=1024, hidden_dim=1024, llm_loss_weight=0.0001, llm_steps=2, train_batch_size=1, log_every=100, and checkpoint_every=1000. The startup event and epoch-1 checkpoint/log were written successfully; frozen LLM gradient loss ran on mps without crashing.
+
+### Did Not Work / Caveats
+
+- The run was stopped after epoch 1. Epoch 1 took about 1,473 seconds, making a 20,000-epoch run impractical at this configuration. The compression CLI writes checkpoints but does not currently support restoring from rae_temporal_latest.pt, and the training JSONL is cleared on startup, so relaunching would start a fresh run unless checkpoint-resume support is added.
+
+### Left To Do
+
+- Add checkpoint restore support for rae_temporal or rerun a shorter feasibility schedule first; consider reducing llm_steps, training on a success/failure slice, or using denser early logging before attempting another long full-cache run.

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import time
+import traceback
 from typing import Any
 
 import torch
@@ -299,7 +301,6 @@ def reconstruction_mse(original: torch.Tensor, reconstructed: torch.Tensor) -> f
     return float(torch.mean((original.float() - reconstructed.float()) ** 2).item())
 
 
-import os
 def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
     if path is None:
         return
@@ -503,6 +504,7 @@ def train_temporal_lstm_autoencoder(
     log_every: int = 1,
     checkpoint_every: int = 0,
     checkpoint_dir: Path | None = None,
+    heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
 ) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
@@ -595,28 +597,22 @@ def train_temporal_lstm_autoencoder(
         "num_layers": num_layers,
         "llm_loss_weight": llm_loss_weight,
         "llm_steps": llm_steps,
+        "log_every": log_every,
+        "checkpoint_every": checkpoint_every,
+        "heartbeat_every_batches": heartbeat_every_batches,
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
     print("[rae_temporal] Startup event logged. Beginning training loop...", flush=True)
-    import traceback
-    import sys
-    def log_exception_to_file(exc, path):
-        try:
-            with open(str(path).replace(".jsonl", "_error.log"), "a", encoding="utf-8") as f:
-                f.write(f"Exception at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                traceback.print_exc(file=f)
-                f.flush()
-        except Exception:
-            pass
-
     for epoch in range(1, epochs + 1):
         try:
+            epoch_start = time.perf_counter()
             reconstruction_numerator = 0.0
             denominator_total = 0.0
             llm_loss_total = 0.0
             llm_loss_batches = 0
-            for batch_start in range(0, int(normalized.shape[0]), batch_size):
+            total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
+            for batch_index, batch_start in enumerate(range(0, int(normalized.shape[0]), batch_size), start=1):
                 batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
                 batch_normalized = normalized[batch_start:batch_stop].to(training_device)
                 batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
@@ -654,12 +650,48 @@ def train_temporal_lstm_autoencoder(
                 denominator_total += float(batch_denominator.detach().item())
                 llm_loss_total += float(llm_loss.detach().item())
                 llm_loss_batches += 1
+                if (
+                    heartbeat_every_batches > 0
+                    and (
+                        batch_index == 1
+                        or batch_index == total_batches
+                        or batch_index % heartbeat_every_batches == 0
+                    )
+                ):
+                    partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
+                    partial_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
+                    heartbeat = {
+                        "event": "batch_heartbeat",
+                        "elapsed_s": time.perf_counter() - start,
+                        "epoch_elapsed_s": time.perf_counter() - epoch_start,
+                        "epoch": epoch,
+                        "epochs": epochs,
+                        "batch": batch_index,
+                        "batches": total_batches,
+                        "batch_start": batch_start,
+                        "batch_stop": batch_stop,
+                        "training_method": "rae_temporal",
+                        "partial_loss": partial_reconstruction_loss + (llm_loss_weight * partial_llm_loss),
+                        "partial_loss_components": {
+                            "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
+                            "frozen_llm_prompt_transition_kl": partial_llm_loss,
+                        },
+                        "memory_gb": _current_memory_gb(),
+                    }
+                    _append_training_event(progress_path, heartbeat)
+                    print(
+                        f"[rae_temporal epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                        f"partial_loss={heartbeat['partial_loss']:.6g} "
+                        f"elapsed={heartbeat['elapsed_s']:.1f}s",
+                        flush=True,
+                    )
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
             mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
             mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss)
             mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
+                "epoch_elapsed_s": time.perf_counter() - epoch_start,
                 "epoch": epoch,
                 "epochs": epochs,
                 "hidden_dim": model.hidden_dim,
@@ -694,7 +726,6 @@ def train_temporal_lstm_autoencoder(
                     f"mem={mem_gb:.2f}GB",
                     flush=True,
                 )
-                sys.stdout.flush()
             if checkpoint_every > 0 and checkpoint_dir is not None and (epoch == 1 or epoch == epochs or epoch % checkpoint_every == 0):
                 checkpoint = {
                     "method": "rae_temporal",
@@ -716,21 +747,23 @@ def train_temporal_lstm_autoencoder(
                 checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
                 torch.save(checkpoint, checkpoint_path)
                 torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
-        except RuntimeError as exc:
-            # Catch OOM and other runtime errors, log and re-raise
-            log_exception_to_file(exc, progress_path)
-            print(f"[ERROR][epoch {epoch}] RuntimeError: {exc}", flush=True)
-            sys.stdout.flush()
-            if 'out of memory' in str(exc).lower():
-                print("[FATAL] Out of memory detected. Stopping training.", flush=True)
-                sys.stdout.flush()
-                break
-            raise
         except Exception as exc:
-            log_exception_to_file(exc, progress_path)
-            print(f"[ERROR][epoch {epoch}] Exception: {exc}", flush=True)
-            sys.stdout.flush()
-            break
+            _append_training_event(
+                progress_path,
+                {
+                    "event": "training_error",
+                    "elapsed_s": time.perf_counter() - start,
+                    "epoch": epoch,
+                    "epochs": epochs,
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "method": "rae_temporal",
+                    "memory_gb": _current_memory_gb(),
+                },
+            )
+            print(f"[ERROR][epoch {epoch}] {type(exc).__name__}: {exc}", flush=True)
+            raise
     with torch.no_grad():
         latent_batches = []
         reconstructed_batches = []
@@ -802,6 +835,7 @@ def run_compression(
     llm_steps: int = 1,
     log_every: int = 1,
     checkpoint_every: int = 0,
+    heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
@@ -858,6 +892,7 @@ def run_compression(
             log_every=log_every,
             checkpoint_every=checkpoint_every,
             checkpoint_dir=artifact_dir / f"{method}_checkpoints",
+            heartbeat_every_batches=heartbeat_every_batches,
             train_batch_size=train_batch_size,
         )
         mean = stats.pop("normalization_mean")

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
+import traceback
 from typing import Sequence
 
 from .baseline_targets import target_dicts
@@ -32,6 +36,44 @@ from .training_diagnostics import summarize_training_curve
 
 SMOKE_MODEL = "EleutherAI/pythia-70m-deduped"
 MAIN_MODEL = "EleutherAI/pythia-410m-deduped"
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    return str(value)
+
+
+def _append_run_event(run_dir: Path | None, event: dict[str, object]) -> None:
+    if run_dir is None:
+        return
+    run_dir.mkdir(parents=True, exist_ok=True)
+    event = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time_unix": time.time(),
+        **event,
+    }
+    path = run_dir / "run_events.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_json_safe(event), sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _run_dir_from_args(args: argparse.Namespace) -> Path | None:
+    if hasattr(args, "run") and getattr(args, "run"):
+        return Path(str(getattr(args, "run")))
+    if hasattr(args, "run_id") and getattr(args, "run_id"):
+        return _run_dir(str(getattr(args, "run_id")), str(getattr(args, "runs_root", "runs")))
+    return None
 
 
 def _run_dir(run_id: str, root: str = "runs") -> Path:
@@ -166,6 +208,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         llm_steps=args.llm_steps,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
+        heartbeat_every_batches=args.heartbeat_every_batches,
         train_batch_size=args.train_batch_size,
     )
     metrics_path = run_dir / "metrics.json"
@@ -255,6 +298,8 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
         limit=args.limit,
         max_new_tokens=args.max_new_tokens,
     )
+    if args.chunk_size > 0:
+        return _run_prompt_baseline_chunks(args, baselines, tier_name, limit, max_new_tokens)
     payload = None
     for baseline in baselines:
         payload = run_prompt_baseline(
@@ -275,6 +320,80 @@ def cmd_prompt_baseline(args: argparse.Namespace) -> int:
     _write_basic_plots(run_dir)
     print(f"Wrote prompt-baseline metrics and report to {run_dir}")
     print(f"Baselines: {len((payload or {}).get('baselines', []))}")
+    return 0
+
+
+def _existing_prompt_record_count(run_dir: Path, baseline: str) -> int:
+    record_path = run_dir / "behavior" / f"{baseline}_records.jsonl"
+    if not record_path.exists():
+        return 0
+    return len(read_jsonl(record_path))
+
+
+def _run_prompt_baseline_chunks(
+    args: argparse.Namespace,
+    baselines: list[str],
+    tier_name: str,
+    limit: int,
+    max_new_tokens: int,
+) -> int:
+    if args.chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if not args.resume:
+        raise ValueError("--chunk-size requires --resume so child chunks append/skip existing records")
+    if len(baselines) != 1:
+        raise ValueError("--chunk-size currently supports exactly one --baseline at a time")
+
+    baseline = baselines[0]
+    run_dir = Path(args.run)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    completed = _existing_prompt_record_count(run_dir, baseline)
+    while completed < limit:
+        next_limit = min(limit, completed + args.chunk_size)
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "latent_kv",
+            "prompt-baseline",
+            "--run",
+            str(run_dir),
+            "--benchmark",
+            args.benchmark,
+            "--baseline",
+            baseline,
+            "--baseline-tier",
+            tier_name,
+            "--limit",
+            str(next_limit),
+            "--seed",
+            str(args.seed),
+            "--max-new-tokens",
+            str(max_new_tokens),
+            "--samples",
+            str(args.samples),
+            "--temperature",
+            str(args.temperature),
+            "--model-id",
+            args.model_id,
+            "--device",
+            args.device,
+            "--resume",
+        ]
+        print(
+            f"[chunk] {baseline}: completed={completed}/{limit}; launching up to {next_limit}",
+            flush=True,
+        )
+        subprocess.run(cmd, check=True)
+        after = _existing_prompt_record_count(run_dir, baseline)
+        if after <= completed:
+            raise RuntimeError(
+                f"chunk made no progress for {baseline}: still at {after}/{limit}"
+            )
+        completed = after
+    _write_basic_plots(run_dir)
+    print(f"Completed chunked prompt baseline: {baseline} {completed}/{limit}")
     return 0
 
 
@@ -480,6 +599,12 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--llm-steps", type=int, default=1, help="Prompt-token state transitions per cache for optional frozen-LLM KL.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
+    compress.add_argument(
+        "--heartbeat-every-batches",
+        type=int,
+        default=100,
+        help="For rae_temporal, write intra-epoch heartbeat events every N mini-batches; 0 disables heartbeats.",
+    )
     compress.add_argument("--train-batch-size", type=int, default=0, help="Mini-batch size for rae_temporal training; 0 uses all records at once.")
     compress.set_defaults(func=cmd_compress)
 
@@ -592,6 +717,12 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--samples", type=int, default=5)
     prompt.add_argument("--temperature", type=float, default=0.7)
     prompt.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
+    prompt.add_argument(
+        "--chunk-size",
+        type=int,
+        default=0,
+        help="Run prompt-baseline in resumable child-process chunks of N examples; useful for long MPS runs.",
+    )
     prompt.set_defaults(func=cmd_prompt_baseline)
 
     prompt_cache = sub.add_parser(
@@ -663,4 +794,44 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    run_dir = _run_dir_from_args(args)
+    start = time.perf_counter()
+    _append_run_event(
+        run_dir,
+        {
+            "event": "command_start",
+            "command": args.command,
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "args": vars(args),
+            "pid": os.getpid(),
+        },
+    )
+    try:
+        exit_code = int(args.func(args))
+    except BaseException as exc:
+        if isinstance(exc, SystemExit):
+            raise
+        _append_run_event(
+            run_dir,
+            {
+                "event": "command_error",
+                "command": args.command,
+                "elapsed_s": time.perf_counter() - start,
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "traceback": traceback.format_exc(),
+                "pid": os.getpid(),
+            },
+        )
+        raise
+    _append_run_event(
+        run_dir,
+        {
+            "event": "command_finish",
+            "command": args.command,
+            "elapsed_s": time.perf_counter() - start,
+            "exit_code": exit_code,
+            "pid": os.getpid(),
+        },
+    )
+    return exit_code
