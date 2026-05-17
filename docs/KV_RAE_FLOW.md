@@ -279,6 +279,29 @@ Keeping those separate is important. The RAE learns a bottlenecked cache-state
 representation. Behavioural usefulness is measured only after local LLM replay
 and task verification.
 
+## Latent Interpolation
+
+Interpolating between two RAE latent points creates an interpolated cache state,
+not a new natural-language problem. A point on the line between solved tasks A
+and B should therefore be decoded as:
+
+```text
+z_alpha = (1 - alpha) * z_A + alpha * z_B
+z_alpha -> reconstructed KV cache sequence
+```
+
+The decoded cache is then replayed under endpoint prompt contexts. In the
+current workflow every interpolation step is replayed once with A's prompt
+tokens/logits and once with B's prompt tokens/logits. Automated correctness is
+only checked against the endpoint target for that replay context. Intermediate
+points have no dataset labels, so their outputs must be inspected as transition
+evidence rather than benchmark examples.
+
+Interpolation artifacts should always preserve the endpoint prompts, original
+outputs, decoded intermediate outputs, alpha values, endpoint categories, and
+cache-validation status. This makes it possible to review whether the path
+appears to preserve, blend, or corrupt reasoning structure.
+
 ## Training Objective
 
 The base objective is masked temporal reconstruction MSE over real prompt-token

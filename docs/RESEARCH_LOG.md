@@ -538,3 +538,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Inspect PCA plots by correctness/category, compare later checkpoints against epoch 10, and consider a stronger manual or local-LLM category audit for ambiguous GSM8K prompts.
+
+## 2026-05-17 - Latent interpolation replay workflow
+
+### Worked
+
+- Added a reusable latent-interpolate CLI that selects correct-correct endpoint pairs, decodes alpha-step temporal RAE latent interpolations, replays each decoded cache under both endpoint prompt contexts, and writes pair/replay/sequence artifacts for inspection.
+
+### Did Not Work / Caveats
+
+- Intermediate points do not have independent GSM8K labels; automated correctness is endpoint-relative only. Full replay sweeps can be expensive because source generations are often hundreds of tokens.
+
+### Left To Do
+
+- Run and inspect the first 50-pair mixed interpolation sweep, then compare decoded transition outputs by same-category versus cross-category pairs.

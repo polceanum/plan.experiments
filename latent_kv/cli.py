@@ -23,6 +23,7 @@ from .corruption_sensitivity import score_corruption_sensitivity
 from .experiment_config import resolve_experiment_config
 from .injection import greedy_continue_from_bundle, validate_bundle_for_injection
 from .latent_analysis import run_latent_analysis
+from .latent_interpolation import parse_alphas, run_latent_interpolation
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
@@ -540,6 +541,27 @@ def cmd_latent_analysis(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_latent_interpolate(args: argparse.Namespace) -> int:
+    import json
+
+    summary = run_latent_interpolation(
+        run_dir=Path(args.run),
+        analysis_dir=Path(args.analysis_dir) if args.analysis_dir else None,
+        checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        pairs=args.pairs,
+        alphas=parse_alphas(args.alphas),
+        pair_mode=args.pair_mode,
+        latent_device_name=args.device,
+        replay_device_name=args.replay_device,
+        model_id=args.model_id,
+        max_new_tokens=args.max_new_tokens,
+        progress_every=args.progress_every,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_corruption_sensitivity(args: argparse.Namespace) -> int:
     import json
 
@@ -708,6 +730,24 @@ def build_parser() -> argparse.ArgumentParser:
     latent_analysis.add_argument("--batch-size", type=int, default=8, help="Latent extraction batch size.")
     latent_analysis.add_argument("--progress-every-batches", type=int, default=50, help="Print CPU latent extraction progress every N batches; 0 disables progress.")
     latent_analysis.set_defaults(func=cmd_latent_analysis)
+
+    latent_interpolate = sub.add_parser(
+        "latent-interpolate",
+        help="Interpolate temporal RAE latent points and replay decoded cache paths",
+    )
+    latent_interpolate.add_argument("--run", required=True)
+    latent_interpolate.add_argument("--analysis-dir", default=None, help="Directory containing checkpoint_latents.pt and task_categories.jsonl.")
+    latent_interpolate.add_argument("--checkpoint", default=None, help="Checkpoint used to produce checkpoint_latents.pt; defaults to latest complete numbered checkpoint.")
+    latent_interpolate.add_argument("--output-dir", default=None, help="Interpolation artifact directory. Defaults to <analysis-dir>/interpolations_epoch_<N>.")
+    latent_interpolate.add_argument("--pairs", type=int, default=50)
+    latent_interpolate.add_argument("--alphas", default="0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1")
+    latent_interpolate.add_argument("--pair-mode", default="mixed", choices=["same_category", "cross_category", "mixed"])
+    latent_interpolate.add_argument("--device", default="cpu", help="Device for RAE latent decoding.")
+    latent_interpolate.add_argument("--replay-device", default="auto", help="Device for local LLM replay.")
+    latent_interpolate.add_argument("--model-id", default=None, help="Local model for replay. Defaults to source record model_id.")
+    latent_interpolate.add_argument("--max-new-tokens", type=int, default=None, help="Replay token budget. Defaults to endpoint source generated_tokens.")
+    latent_interpolate.add_argument("--progress-every", type=int, default=25, help="Print replay progress every N rows; 0 disables progress.")
+    latent_interpolate.set_defaults(func=cmd_latent_interpolate)
 
     corruption = sub.add_parser(
         "corruption-sensitivity",

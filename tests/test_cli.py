@@ -86,6 +86,19 @@ def test_latent_analysis_help_lists_outputs(capsys):
     assert "rae_temporal" in out
 
 
+def test_latent_interpolate_help_lists_replay_controls(capsys):
+    try:
+        main(["latent-interpolate", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--analysis-dir" in out
+    assert "--alphas" in out
+    assert "--pair-mode" in out
+    assert "--replay-device" in out
+    assert "--max-new-tokens" in out
+
+
 def test_corruption_sensitivity_help_lists_alpha(capsys):
     try:
         main(["corruption-sensitivity", "--help"])
