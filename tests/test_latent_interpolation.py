@@ -216,4 +216,10 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "endpoint_prompt" in rows
     assert "decoded_output" in rows
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_sequences.md").exists()
-    assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").exists()
+    report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").read_text(encoding="utf-8")
+    assert "Endpoint A solved plan" in report
+    assert "Decoded A reconstruction" in report
+    assert "Decoded B reconstruction" in report
+    assert "Endpoint B solved plan" in report
+    solved_report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection_solved_reconstructions.md")
+    assert solved_report.exists()

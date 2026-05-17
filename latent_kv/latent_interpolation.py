@@ -418,18 +418,49 @@ def _excerpt(text: Any, limit: int = 420) -> str:
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _render_inspection_report(pair_rows: list[dict[str, Any]], replay_rows: list[dict[str, Any]]) -> str:
+def _pair_reconstructions_solve(pair: dict[str, Any], pair_replay_rows: list[dict[str, Any]]) -> bool:
+    del pair
+    a_rows = [row for row in pair_replay_rows if row["replay_context"] == "a"]
+    b_rows = [row for row in pair_replay_rows if row["replay_context"] == "b"]
+    if not a_rows or not b_rows:
+        return False
+    min_alpha = min(float(row["alpha"]) for row in a_rows)
+    max_alpha = max(float(row["alpha"]) for row in b_rows)
+    a_reconstruction = [row for row in a_rows if abs(float(row["alpha"]) - min_alpha) < 1e-9]
+    b_reconstruction = [row for row in b_rows if abs(float(row["alpha"]) - max_alpha) < 1e-9]
+    return bool(
+        a_reconstruction
+        and b_reconstruction
+        and a_reconstruction[0].get("decoded_correct_for_endpoint")
+        and b_reconstruction[0].get("decoded_correct_for_endpoint")
+    )
+
+
+def _render_inspection_report(
+    pair_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+    solved_reconstructions_only: bool = False,
+) -> str:
     rows_by_pair: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in replay_rows:
         rows_by_pair[str(row["pair_id"])].append(row)
     chunks = [
-        "# Latent Interpolation Inspection Report",
+        "# Latent Interpolation Inspection Report" if not solved_reconstructions_only else "# Solved-Reconstruction Interpolation Inspection Report",
         "",
-        "This file is optimized for human inspection. The JSON blocks are stable machine-readable anchors.",
+        "This file is optimized for human inspection. Each table reads left-to-right as a bridge:",
+        "",
+        "Endpoint A solved plan -> decoded A reconstruction -> interpolation points -> decoded B reconstruction -> Endpoint B solved plan.",
+        "",
+        "The JSON blocks are stable machine-readable anchors.",
         "",
     ]
+    rendered_pairs = 0
     for pair in pair_rows:
         pair_id = str(pair["pair_id"])
+        pair_replay_rows = rows_by_pair[pair_id]
+        if solved_reconstructions_only and not _pair_reconstructions_solve(pair, pair_replay_rows):
+            continue
+        rendered_pairs += 1
         metadata = {
             "pair_id": pair_id,
             "pair_type": pair["pair_type"],
@@ -457,22 +488,53 @@ def _render_inspection_report(pair_rows: list[dict[str, Any]], replay_rows: list
                 "",
                 f"**B original**: {_excerpt(pair['b']['output_text'], 520)}",
                 "",
-                "| alpha | A-context decoded continuation | B-context decoded continuation |",
-                "|---:|---|---|",
+                "| stage | alpha | replay context | target | parsed/correct | continuation |",
+                "|---|---:|---|---|---|---|",
             ]
         )
-        a_rows = {float(row["alpha"]): row for row in rows_by_pair[pair_id] if row["replay_context"] == "a"}
-        b_rows = {float(row["alpha"]): row for row in rows_by_pair[pair_id] if row["replay_context"] == "b"}
-        for alpha in sorted(set(a_rows) | set(b_rows)):
-            a_row = a_rows.get(alpha, {})
-            b_row = b_rows.get(alpha, {})
-            a_text = _excerpt(a_row.get("decoded_output"), 260).replace("|", "\\|")
-            b_text = _excerpt(b_row.get("decoded_output"), 260).replace("|", "\\|")
+        a_rows = {float(row["alpha"]): row for row in pair_replay_rows if row["replay_context"] == "a"}
+        b_rows = {float(row["alpha"]): row for row in pair_replay_rows if row["replay_context"] == "b"}
+        alphas = sorted(set(a_rows) | set(b_rows))
+
+        def append_original_row(stage: str, endpoint: dict[str, Any], context: str) -> None:
+            text = _excerpt(endpoint.get("output_text"), 300).replace("|", "\\|")
             chunks.append(
-                f"| {alpha:.3f} | parsed `{a_row.get('decoded_parsed_answer')}` correct `{a_row.get('decoded_correct_for_endpoint')}`<br>{a_text} | "
-                f"parsed `{b_row.get('decoded_parsed_answer')}` correct `{b_row.get('decoded_correct_for_endpoint')}`<br>{b_text} |"
+                f"| {stage} | - | {context} | `{endpoint.get('target')}` | parsed `{endpoint.get('parsed_answer')}` correct `{endpoint.get('correct')}` | {text} |"
             )
+
+        def append_decoded_row(stage: str, row: dict[str, Any]) -> None:
+            text = _excerpt(row.get("decoded_output"), 300).replace("|", "\\|")
+            chunks.append(
+                f"| {stage} | {float(row.get('alpha', 0.0)):.3f} | {row.get('replay_context')} | `{row.get('endpoint_target')}` | "
+                f"parsed `{row.get('decoded_parsed_answer')}` correct `{row.get('decoded_correct_for_endpoint')}` | {text} |"
+            )
+
+        append_original_row("Endpoint A solved plan", pair["a"], "a/original")
+        if alphas:
+            first_alpha = alphas[0]
+            last_alpha = alphas[-1]
+            if first_alpha in a_rows:
+                append_decoded_row("Decoded A reconstruction", a_rows[first_alpha])
+            for alpha in alphas[1:-1]:
+                if alpha in a_rows:
+                    append_decoded_row("Interpolation from A prompt", a_rows[alpha])
+                if alpha in b_rows:
+                    append_decoded_row("Interpolation from B prompt", b_rows[alpha])
+            if last_alpha in b_rows:
+                append_decoded_row("Decoded B reconstruction", b_rows[last_alpha])
+        append_original_row("Endpoint B solved plan", pair["b"], "b/original")
         chunks.append("")
+    if solved_reconstructions_only and rendered_pairs == 0:
+        chunks.extend(
+            [
+                "## No solved endpoint reconstructions found",
+                "",
+                "No pair in this sweep had both decoded endpoint reconstructions solve their original endpoint tasks.",
+                "",
+                "That means there is currently no trustworthy interpolation bridge to inspect first. Use the full inspection report for qualitative failure modes, or rerun this report on a later checkpoint after reconstruction/replay quality improves.",
+                "",
+            ]
+        )
     return "\n".join(chunks)
 
 
@@ -659,10 +721,15 @@ def run_latent_interpolation(
     replays_path = output_dir / "interpolation_replays.jsonl"
     sequence_path = output_dir / "interpolation_sequences.md"
     inspection_path = output_dir / "interpolation_inspection.md"
+    solved_inspection_path = output_dir / "interpolation_inspection_solved_reconstructions.md"
     _jsonl_write(pairs_path, pair_rows)
     _jsonl_write(replays_path, replay_rows)
     sequence_path.write_text(_render_sequences(pair_rows, replay_rows), encoding="utf-8")
     inspection_path.write_text(_render_inspection_report(pair_rows, replay_rows), encoding="utf-8")
+    solved_inspection_path.write_text(
+        _render_inspection_report(pair_rows, replay_rows, solved_reconstructions_only=True),
+        encoding="utf-8",
+    )
     plot_path = _plot_interpolation_accuracy(replay_rows, output_dir)
 
     artifacts = {
@@ -670,6 +737,7 @@ def run_latent_interpolation(
         "interpolation_replays.jsonl": str(replays_path),
         "interpolation_sequences.md": str(sequence_path),
         "interpolation_inspection.md": str(inspection_path),
+        "interpolation_inspection_solved_reconstructions.md": str(solved_inspection_path),
     }
     if plot_path is not None:
         artifacts["interpolation_accuracy_by_alpha.png"] = plot_path
