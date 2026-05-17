@@ -95,6 +95,34 @@ def test_select_interpolation_pairs_can_spread_and_filter_near_duplicates():
     assert {pairs[0].a_task_id, pairs[0].b_task_id} != {"a", "b"}
 
 
+def test_select_interpolation_pairs_can_require_reconstructed_correct_endpoints():
+    latents = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.9, 0.1],
+            [0.0, 1.0],
+            [0.1, 0.9],
+        ]
+    )
+    annotations = [
+        {"task_id": "a", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "b", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "c", "correct": True, "primary_category": "rate_time_work"},
+        {"task_id": "d", "correct": True, "primary_category": "rate_time_work"},
+    ]
+
+    pairs = select_interpolation_pairs(
+        latents,
+        annotations,
+        pairs=1,
+        pair_mode="cross_category",
+        eligible_indices={1, 3},
+    )
+
+    assert len(pairs) == 1
+    assert {pairs[0].a_index, pairs[0].b_index} == {1, 3}
+
+
 class _FakeRAE(torch.nn.Module):
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         batch = int(z.shape[0])
@@ -224,6 +252,52 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "Endpoint B solved plan" in report
     solved_report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection_solved_reconstructions.md")
     assert solved_report.exists()
+
+
+def test_run_latent_interpolation_can_filter_from_reconstruction_scan(tmp_path: Path, monkeypatch):
+    run_dir = _write_interpolation_run(tmp_path)
+    checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+    scan_path = run_dir / "analysis" / "scan" / "reconstruction_replays.jsonl"
+    scan_path.parent.mkdir(parents=True)
+    scan_path.write_text(
+        "\n".join(
+            [
+                '{"index": 0, "decoded_correct": true, "replay_error": null}',
+                '{"index": 1, "decoded_correct": true, "replay_error": null}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        interpolation,
+        "_load_checkpoint_model",
+        lambda path: (
+            _FakeRAE(),
+            {
+                "normalization_mean": torch.zeros(1, 1, 2),
+                "normalization_std": torch.ones(1, 1, 2),
+            },
+        ),
+    )
+    monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
+    monkeypatch.setattr(interpolation, "greedy_continue_from_loaded_bundle", lambda **kwargs: "The answer is 1")
+
+    summary = run_latent_interpolation(
+        run_dir,
+        checkpoint_path=checkpoint,
+        pairs=1,
+        alphas=[0.0, 1.0],
+        pair_mode="cross_category",
+        replay_device_name="cpu",
+        progress_every=0,
+        reconstruction_scan_path=scan_path,
+    )
+
+    assert summary.pairs == 1
+    assert summary.reconstruction_scan_path == str(scan_path)
+    assert summary.eligible_endpoint_count == 2
 
 
 def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, monkeypatch):

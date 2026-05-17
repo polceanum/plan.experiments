@@ -566,3 +566,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Rerun the representative sweep on later checkpoints after loss improves, and compare whether endpoint-alpha decodes become more task-specific before scaling to more pairs.
+
+## 2026-05-18 - Epoch 20 reconstructed interpolation probe
+
+### Worked
+
+- Epoch 20 latent analysis artifacts were reused to filter interpolation endpoints through a reconstruction scan; the probe100 scan found 2 decoded-correct endpoints and produced 1 cross-category reconstructed-correct interpolation bridge with 18 replay rows.
+
+### Did Not Work / Caveats
+
+- The decoded reconstructions often produced the correct numeric answer while reasoning about the wrong scenario, so endpoint numeric correctness alone is not a faithful solved-plan filter.
+
+### Left To Do
+
+- Run a broader reconstruction scan on later checkpoints and add semantic/structural faithfulness checks before using reconstructed-correct pairs as interpretive evidence.

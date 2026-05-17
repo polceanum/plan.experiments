@@ -56,6 +56,8 @@ class InterpolationSummary:
     replay_failures: int
     accuracy_by_context_alpha: dict[str, dict[str, float]]
     artifacts: dict[str, str]
+    reconstruction_scan_path: str | None = None
+    eligible_endpoint_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,8 +90,15 @@ def interpolate_latents(a: torch.Tensor, b: torch.Tensor, alpha: float) -> torch
     return ((1.0 - float(alpha)) * a) + (float(alpha) * b)
 
 
-def _candidate_pairs(latents: torch.Tensor, annotations: list[dict[str, Any]], same_category: bool) -> list[tuple[float, int, int]]:
+def _candidate_pairs(
+    latents: torch.Tensor,
+    annotations: list[dict[str, Any]],
+    same_category: bool,
+    eligible_indices: set[int] | None = None,
+) -> list[tuple[float, int, int]]:
     correct_indices = [idx for idx, row in enumerate(annotations) if bool(row.get("correct"))]
+    if eligible_indices is not None:
+        correct_indices = [idx for idx in correct_indices if idx in eligible_indices]
     if not correct_indices:
         return []
     index_tensor = torch.tensor(correct_indices, dtype=torch.long)
@@ -186,6 +195,7 @@ def select_interpolation_pairs(
     min_distance: float = 0.0,
     max_distance: float | None = None,
     max_prompt_overlap: float = 0.65,
+    eligible_indices: set[int] | None = None,
 ) -> list[InterpolationPair]:
     pair_mode = pair_mode.lower()
     if pair_mode not in {"same_category", "cross_category", "mixed"}:
@@ -205,8 +215,8 @@ def select_interpolation_pairs(
     selected: list[InterpolationPair] = []
     used: set[tuple[int, int]] = set()
     candidate_cache = {
-        "same_category": _candidate_pairs(latents, annotations, same_category=True),
-        "cross_category": _candidate_pairs(latents, annotations, same_category=False),
+        "same_category": _candidate_pairs(latents, annotations, same_category=True, eligible_indices=eligible_indices),
+        "cross_category": _candidate_pairs(latents, annotations, same_category=False, eligible_indices=eligible_indices),
     }
     for mode, wanted in modes:
         selected_candidates = _select_candidates(
@@ -243,6 +253,20 @@ def select_interpolation_pairs(
     if len(selected) < pairs:
         raise ValueError(f"Only found {len(selected)} pairs for mode {pair_mode}; requested {pairs}")
     return selected[:pairs]
+
+
+def _load_reconstructed_correct_indices(path: Path) -> set[int]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing reconstruction scan artifact: {path}")
+    rows = read_jsonl(path)
+    indices = {
+        int(row["index"])
+        for row in rows
+        if bool(row.get("decoded_correct")) and row.get("replay_error") in {None, ""}
+    }
+    if not indices:
+        raise ValueError(f"No decoded-correct reconstruction endpoints found in {path}")
+    return indices
 
 
 def _jsonl_write(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -727,6 +751,7 @@ def run_latent_interpolation(
     min_distance: float = 0.0,
     max_distance: float | None = None,
     max_prompt_overlap: float = 0.65,
+    reconstruction_scan_path: Path | None = None,
 ) -> InterpolationSummary:
     analysis_dir, checkpoint_path, checkpoint_meta, latents, annotations, records, checkpoint_epoch = _load_interpolation_inputs(
         run_dir,
@@ -736,6 +761,7 @@ def run_latent_interpolation(
     alphas = alphas or list(DEFAULT_ALPHAS)
     output_dir = output_dir or analysis_dir / f"interpolations_epoch_{checkpoint_epoch or 'unknown'}"
     output_dir.mkdir(parents=True, exist_ok=True)
+    eligible_indices = _load_reconstructed_correct_indices(reconstruction_scan_path) if reconstruction_scan_path is not None else None
 
     pairs_selected = select_interpolation_pairs(
         latents,
@@ -747,6 +773,7 @@ def run_latent_interpolation(
         min_distance=min_distance,
         max_distance=max_distance,
         max_prompt_overlap=max_prompt_overlap,
+        eligible_indices=eligible_indices,
     )
 
     latent_device = choose_device(latent_device_name)
@@ -898,6 +925,8 @@ def run_latent_interpolation(
         replay_failures=sum(1 for row in replay_rows if row.get("replay_error")),
         accuracy_by_context_alpha=_accuracy_by_context_alpha(replay_rows),
         artifacts=artifacts,
+        reconstruction_scan_path=str(reconstruction_scan_path) if reconstruction_scan_path is not None else None,
+        eligible_endpoint_count=len(eligible_indices) if eligible_indices is not None else None,
     )
     write_json(output_dir / "interpolation_summary.json", asdict(summary))
     return summary

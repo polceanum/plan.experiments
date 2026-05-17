@@ -561,6 +561,7 @@ def cmd_latent_interpolate(args: argparse.Namespace) -> int:
         min_distance=args.min_distance,
         max_distance=args.max_distance,
         max_prompt_overlap=args.max_prompt_overlap,
+        reconstruction_scan_path=Path(args.reconstruction_scan) if args.reconstruction_scan else None,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -774,6 +775,11 @@ def build_parser() -> argparse.ArgumentParser:
     latent_interpolate.add_argument("--min-distance", type=float, default=0.0, help="Minimum cosine distance between endpoints.")
     latent_interpolate.add_argument("--max-distance", type=float, default=None, help="Optional maximum cosine distance between endpoints.")
     latent_interpolate.add_argument("--max-prompt-overlap", type=float, default=0.65, help="Maximum endpoint problem token Jaccard overlap.")
+    latent_interpolate.add_argument(
+        "--reconstruction-scan",
+        default=None,
+        help="Optional reconstruction_replays.jsonl; when set, only decoded-correct endpoints from that scan are paired.",
+    )
     latent_interpolate.set_defaults(func=cmd_latent_interpolate)
 
     reconstruction_scan = sub.add_parser(
