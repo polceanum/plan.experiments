@@ -594,3 +594,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Rerun convincing reconstruction scans on later checkpoints; consider adding teacher-forced token/logit faithfulness or semantic overlap metrics before scaling interpolation endpoint selection.
+
+## 2026-05-18 - Teacher-forced replay KL training path
+
+### Worked
+
+- Added a separate rae_temporal teacher-forced generated-token replay KL loss, controlled by --replay-loss-weight and --replay-loss-steps, so replay-sensitive gradients can be tested without using final task correctness as supervision. Epoch-10 MSE-only artifacts were extracted and a 25-endpoint reconstruction probe ran with no replay failures.
+
+### Did Not Work / Caveats
+
+- Epoch-10 MSE-only decoding still produced 0 convincing reconstructions in the probe; the one numeric-correct row reasoned about the wrong purchase scenario, so MSE around 0.398 is not yet enough for faithful replay.
+
+### Left To Do
+
+- Launch a separate MPS teacher-forced replay-KL run and compare checkpoint replay/faithfulness against the clean MSE-only epoch-10 baseline.

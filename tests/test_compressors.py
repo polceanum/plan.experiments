@@ -53,6 +53,7 @@ def _write_run(tmp_path: Path) -> None:
             input_ids=torch.tensor([[1, 2, 3, 4]]),
             attention_mask=torch.tensor([[1, 1, 1, 1]]),
             last_logits=torch.randn(1, 10),
+            generation_token_ids=torch.tensor([[5, 6]]),
         )
         append_jsonl(
             tmp_path / "records.jsonl",
@@ -256,6 +257,32 @@ def test_temporal_rae_can_use_frozen_llm_prompt_state_gradients(tmp_path: Path, 
     epoch_rows = [row for row in training_rows if "llm_gradients" in row]
     assert epoch_rows[0]["llm_gradients"] is True
     assert "frozen_llm_prompt_transition_kl" in epoch_rows[0]["loss_components"]
+
+
+def test_temporal_rae_can_use_teacher_forced_generation_replay_gradients(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+    monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
+
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        replay_loss_weight=0.01,
+        replay_loss_steps=2,
+        log_every=1,
+    )
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+
+    assert artifact["frozen_llm_gradients"] is True
+    assert artifact["teacher_forced_generation_replay_kl_weight"] == 0.01
+    assert artifact["teacher_forced_generation_replay_steps"] == 2
+    epoch_rows = [row for row in training_rows if "llm_gradients" in row]
+    assert epoch_rows[0]["llm_gradients"] is True
+    assert "teacher_forced_generation_replay_kl" in epoch_rows[0]["loss_components"]
 
 
 def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):

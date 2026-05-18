@@ -208,6 +208,8 @@ def cmd_compress(args: argparse.Namespace) -> int:
         llm_device_name=args.device,
         llm_loss_weight=args.llm_loss_weight,
         llm_steps=args.llm_steps,
+        replay_loss_weight=args.replay_loss_weight,
+        replay_loss_steps=args.replay_loss_steps,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
         heartbeat_every_batches=args.heartbeat_every_batches,
@@ -660,6 +662,8 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--device", default="auto", help="Device for rae_temporal training and optional frozen-LLM prompt-state gradients.")
     compress.add_argument("--llm-loss-weight", type=float, default=0.0, help="Weight for frozen-LLM prompt-state transition KL in rae_temporal training.")
     compress.add_argument("--llm-steps", type=int, default=1, help="Prompt-token state transitions per cache for optional frozen-LLM KL.")
+    compress.add_argument("--replay-loss-weight", type=float, default=0.0, help="Weight for teacher-forced generated-token replay KL in rae_temporal training.")
+    compress.add_argument("--replay-loss-steps", type=int, default=0, help="Generated reasoning tokens per cache for optional teacher-forced replay KL.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
     compress.add_argument(

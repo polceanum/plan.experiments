@@ -137,6 +137,8 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--num-layers" in out
     assert "--llm-loss-weight" in out
     assert "--llm-steps" in out
+    assert "--replay-loss-weight" in out
+    assert "--replay-loss-steps" in out
     assert "rae_temporal" in out
     assert "--weight-decay" in out
     assert "--log-every" in out
