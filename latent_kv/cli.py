@@ -657,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--hidden-dim", type=int, default=128, help="Hidden size for sequence codecs such as rae_temporal.")
     compress.add_argument("--num-layers", type=int, default=1, help="LSTM depth for sequence codecs such as rae_temporal.")
     compress.add_argument("--model-id", default=None, help="Frozen local LLM for optional rae_temporal prompt-state KL gradients.")
-    compress.add_argument("--device", default="auto", help="Device for optional frozen-LLM prompt-state gradients.")
+    compress.add_argument("--device", default="auto", help="Device for rae_temporal training and optional frozen-LLM prompt-state gradients.")
     compress.add_argument("--llm-loss-weight", type=float, default=0.0, help="Weight for frozen-LLM prompt-state transition KL in rae_temporal training.")
     compress.add_argument("--llm-steps", type=int, default=1, help="Prompt-token state transitions per cache for optional frozen-LLM KL.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")

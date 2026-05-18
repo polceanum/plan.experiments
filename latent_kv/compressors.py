@@ -510,7 +510,7 @@ def train_temporal_lstm_autoencoder(
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
-    training_device = choose_device(llm_device_name) if llm_loss_weight > 0 else torch.device("cpu")
+    training_device = choose_device(llm_device_name)
     print(f"[rae_temporal] Device selected: {training_device}", flush=True)
     sequence = _temporal_matrix(x, aligned_shapes)
     print(f"[rae_temporal] Temporal matrix shape: {sequence.shape}", flush=True)
