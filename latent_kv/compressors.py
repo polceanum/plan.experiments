@@ -38,6 +38,7 @@ def _record_label(record: dict[str, Any]) -> dict[str, Any]:
         "correct": bool(record.get("correct")),
         "target": record.get("target"),
         "parsed_answer": record.get("parsed_answer"),
+        "output_text": record.get("output_text"),
         "prompt_baseline": metadata.get("prompt_baseline"),
         "prompt_protocol": metadata.get("prompt_protocol"),
         "source": metadata.get("source"),
@@ -250,6 +251,23 @@ def _generation_token_ids(bundle: dict[str, Any], steps: int) -> torch.Tensor:
     if generation_token_ids is None or int(generation_token_ids.numel()) == 0:
         return torch.empty(0, dtype=torch.long)
     return generation_token_ids.reshape(-1)[: max(0, int(steps))].long()
+
+
+def _generation_tokens_for_replay(
+    bundle: dict[str, Any],
+    steps: int,
+    tokenizer: Any | None = None,
+    output_text: str | None = None,
+) -> torch.Tensor:
+    if int(steps) <= 0:
+        return torch.empty(0, dtype=torch.long)
+    token_ids = _generation_token_ids(bundle, steps)
+    if int(token_ids.numel()) > 0:
+        return token_ids
+    if tokenizer is None or not output_text:
+        return token_ids
+    encoded = tokenizer.encode(str(output_text), add_special_tokens=False)
+    return torch.tensor(encoded[: max(0, int(steps))], dtype=torch.long)
 
 
 def _teacher_forced_generation_logits(
@@ -556,6 +574,7 @@ def train_temporal_lstm_autoencoder(
     llm_steps: int = 1,
     replay_loss_weight: float = 0.0,
     replay_loss_steps: int = 0,
+    source_labels: list[dict[str, Any]] | None = None,
     progress_path: Path | None = None,
     log_every: int = 1,
     checkpoint_every: int = 0,
@@ -593,6 +612,7 @@ def train_temporal_lstm_autoencoder(
     ).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
     llm = None
+    tokenizer = None
     llm_bundles: list[dict[str, Any]] = []
     target_transition_logits: list[list[torch.Tensor]] = []
     replay_token_ids: list[torch.Tensor] = []
@@ -605,7 +625,7 @@ def train_temporal_lstm_autoencoder(
         chosen_model_id = llm_model_id or str((first_bundle.get("metadata") or {}).get("model_id") or "")
         if not chosen_model_id:
             raise ValueError("llm_model_id is required when cache metadata has no model_id")
-        llm, _ = load_model_and_tokenizer(chosen_model_id, training_device, local_files_only=True)
+        llm, tokenizer = load_model_and_tokenizer(chosen_model_id, training_device, local_files_only=True)
         expected_layers = int(getattr(llm.config, "num_hidden_layers", len(shapes[0])))
         if len(shapes[0]) != expected_layers:
             raise ValueError(
@@ -632,7 +652,10 @@ def train_temporal_lstm_autoencoder(
                     )
                 else:
                     target_transition_logits.append([])
-                token_ids = _generation_token_ids(bundle, replay_loss_steps)
+                output_text = None
+                if source_labels is not None and len(source_labels) > len(llm_bundles):
+                    output_text = source_labels[len(llm_bundles)].get("output_text")
+                token_ids = _generation_tokens_for_replay(bundle, replay_loss_steps, tokenizer=tokenizer, output_text=output_text)
                 replay_token_ids.append(token_ids.cpu())
                 if replay_loss_weight > 0:
                     target_replay_logits.append(
@@ -1006,6 +1029,7 @@ def run_compression(
             llm_steps=llm_steps,
             replay_loss_weight=replay_loss_weight,
             replay_loss_steps=replay_loss_steps,
+            source_labels=cache_matrix.labels,
             progress_path=progress_path,
             log_every=log_every,
             checkpoint_every=checkpoint_every,
