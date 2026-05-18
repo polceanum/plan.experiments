@@ -202,50 +202,6 @@ def _unflatten_cache_grad(vector: torch.Tensor, shapes: list[tuple[tuple[int, ..
     return tuple(layers)
 
 
-def _cache_prefix(cache: Any, token_count: int) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
-    return tuple((key[..., :token_count, :], value[..., :token_count, :]) for key, value in cache)
-
-
-def _prompt_state_transition_logits(
-    bundle: dict[str, Any],
-    cache: Any,
-    model: Any,
-    device: torch.device,
-    steps: int,
-) -> list[torch.Tensor]:
-    input_ids = bundle.get("input_ids")
-    attention_mask = bundle.get("attention_mask")
-    if input_ids is None:
-        raise ValueError("Bundle must contain input_ids for frozen-LLM temporal loss")
-    input_ids = input_ids.to(device)
-    prompt_len = int(input_ids.shape[-1])
-    max_steps = min(max(0, int(steps)), max(0, prompt_len - 1))
-    if max_steps == 0:
-        return []
-    if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids)
-    attention_mask = attention_mask.to(device)
-    forward_parameters = _forward_parameters(model)
-    logits_by_step: list[torch.Tensor] = []
-    for step_idx in range(max_steps):
-        prefix_len = step_idx + 1
-        model_kwargs = {
-            "input_ids": input_ids[:, prefix_len : prefix_len + 1],
-            "attention_mask": attention_mask[:, : prefix_len + 1],
-            "past_key_values": _cache_prefix(cache, prefix_len),
-            "use_cache": True,
-            "return_dict": True,
-        }
-        position = torch.tensor([[prefix_len]], dtype=torch.long, device=device)
-        if "position_ids" in forward_parameters:
-            model_kwargs["position_ids"] = position
-        if "cache_position" in forward_parameters:
-            model_kwargs["cache_position"] = position.reshape(-1)
-        outputs = model(**model_kwargs)
-        logits_by_step.append(outputs.logits[:, -1, :])
-    return logits_by_step
-
-
 def _generation_token_ids(bundle: dict[str, Any], steps: int) -> torch.Tensor:
     generation_token_ids = bundle.get("generation_token_ids")
     if generation_token_ids is None or int(generation_token_ids.numel()) == 0:
@@ -586,6 +542,11 @@ def train_temporal_lstm_autoencoder(
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
     replay_loss_weight = float(replay_loss_weight)
+    if llm_loss_weight != 0.0:
+        raise ValueError(
+            "llm_loss_weight is deprecated because prompt-prefix KL can bias the codec away from "
+            "trajectory reconstruction. Use replay_loss_weight for teacher-forced generated-token replay KL."
+        )
     training_device = choose_device(llm_device_name)
     print(f"[rae_temporal] Device selected: {training_device}", flush=True)
     sequence = _temporal_matrix(x, aligned_shapes)
@@ -614,22 +575,21 @@ def train_temporal_lstm_autoencoder(
     llm = None
     tokenizer = None
     llm_bundles: list[dict[str, Any]] = []
-    target_transition_logits: list[list[torch.Tensor]] = []
     replay_token_ids: list[torch.Tensor] = []
     target_replay_logits: list[list[torch.Tensor]] = []
-    if llm_loss_weight > 0 or replay_loss_weight > 0:
-        print("[rae_temporal] Loading LLM for frozen loss...", flush=True)
+    if replay_loss_weight > 0:
+        print("[rae_temporal] Loading LLM for teacher-forced replay loss...", flush=True)
         if not cache_paths:
-            raise ValueError("cache_paths are required when frozen LLM losses are enabled")
+            raise ValueError("cache_paths are required when replay loss is enabled")
         first_bundle = load_cache_bundle(Path(cache_paths[0]))
         chosen_model_id = llm_model_id or str((first_bundle.get("metadata") or {}).get("model_id") or "")
         if not chosen_model_id:
-            raise ValueError("llm_model_id is required when cache metadata has no model_id")
+            raise ValueError("llm_model_id is required when replay loss is enabled and cache metadata has no model_id")
         llm, tokenizer = load_model_and_tokenizer(chosen_model_id, training_device, local_files_only=True)
         expected_layers = int(getattr(llm.config, "num_hidden_layers", len(shapes[0])))
         if len(shapes[0]) != expected_layers:
             raise ValueError(
-                f"Frozen-LLM loss requires full-layer caches; got {len(shapes[0])} cache layers for model with {expected_layers} layers"
+                f"Replay loss requires full-layer caches; got {len(shapes[0])} cache layers for model with {expected_layers} layers"
             )
         for parameter in llm.parameters():
             parameter.requires_grad_(False)
@@ -637,48 +597,30 @@ def train_temporal_lstm_autoencoder(
             for path in cache_paths:
                 bundle = load_cache_bundle(Path(path))
                 original_cache = cache_to_device(bundle["cache"], training_device)
-                if llm_loss_weight > 0:
-                    target_transition_logits.append(
-                        [
-                            logits.detach().cpu()
-                            for logits in _prompt_state_transition_logits(
-                                bundle,
-                                original_cache,
-                                llm,
-                                training_device,
-                                llm_steps,
-                            )
-                        ]
-                    )
-                else:
-                    target_transition_logits.append([])
                 output_text = None
                 if source_labels is not None and len(source_labels) > len(llm_bundles):
                     output_text = source_labels[len(llm_bundles)].get("output_text")
                 token_ids = _generation_tokens_for_replay(bundle, replay_loss_steps, tokenizer=tokenizer, output_text=output_text)
                 replay_token_ids.append(token_ids.cpu())
-                if replay_loss_weight > 0:
-                    target_replay_logits.append(
-                        [
-                            logits.detach().cpu()
-                            for logits in _teacher_forced_generation_logits(
-                                bundle,
-                                original_cache,
-                                token_ids.to(training_device),
-                                llm,
-                                training_device,
-                            )
-                        ]
-                    )
-                else:
-                    target_replay_logits.append([])
+                target_replay_logits.append(
+                    [
+                        logits.detach().cpu()
+                        for logits in _teacher_forced_generation_logits(
+                            bundle,
+                            original_cache,
+                            token_ids.to(training_device),
+                            llm,
+                            training_device,
+                        )
+                    ]
+                )
                 llm_bundles.append(
                     {
                         "input_ids": bundle.get("input_ids"),
                         "attention_mask": bundle.get("attention_mask"),
                     }
                 )
-        print("[rae_temporal] LLM frozen loss targets loaded.", flush=True)
+        print("[rae_temporal] Teacher-forced replay loss targets loaded.", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
@@ -698,8 +640,8 @@ def train_temporal_lstm_autoencoder(
         "latent_dim": latent_dim,
         "hidden_dim": hidden_dim,
         "num_layers": num_layers,
-        "llm_loss_weight": llm_loss_weight,
-        "llm_steps": llm_steps,
+        "deprecated_llm_loss_weight": llm_loss_weight,
+        "deprecated_llm_steps": llm_steps,
         "replay_loss_weight": replay_loss_weight,
         "replay_loss_steps": replay_loss_steps,
         "log_every": log_every,
@@ -714,8 +656,6 @@ def train_temporal_lstm_autoencoder(
             epoch_start = time.perf_counter()
             reconstruction_numerator = 0.0
             denominator_total = 0.0
-            llm_loss_total = 0.0
-            llm_loss_batches = 0
             replay_loss_total = 0.0
             replay_loss_batches = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
@@ -728,52 +668,33 @@ def train_temporal_lstm_autoencoder(
                 opt.zero_grad(set_to_none=True)
                 reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
                 reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
-                llm_loss = reconstructed_norm.new_tensor(0.0)
                 replay_loss = reconstructed_norm.new_tensor(0.0)
-                if llm is not None and (llm_loss_weight > 0 or replay_loss_weight > 0):
+                if llm is not None and replay_loss_weight > 0:
                     reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
-                    transition_losses = []
                     replay_losses = []
                     for local_idx, row in enumerate(reconstructed_sequence):
                         row_idx = batch_start + local_idx
                         aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
                         compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
                         reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
-                        if llm_loss_weight > 0:
-                            predicted_logits = _prompt_state_transition_logits(
-                                llm_bundles[row_idx],
-                                reconstructed_cache,
-                                llm,
-                                training_device,
-                                llm_steps,
-                            )
-                            for predicted, target in zip(predicted_logits, target_transition_logits[row_idx]):
-                                target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
-                                predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
-                                transition_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
-                        if replay_loss_weight > 0:
-                            predicted_replay_logits = _teacher_forced_generation_logits(
-                                llm_bundles[row_idx],
-                                reconstructed_cache,
-                                replay_token_ids[row_idx].to(training_device),
-                                llm,
-                                training_device,
-                            )
-                            for predicted, target in zip(predicted_replay_logits, target_replay_logits[row_idx]):
-                                target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
-                                predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
-                                replay_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
-                    if transition_losses:
-                        llm_loss = torch.stack(transition_losses).mean()
+                        predicted_replay_logits = _teacher_forced_generation_logits(
+                            llm_bundles[row_idx],
+                            reconstructed_cache,
+                            replay_token_ids[row_idx].to(training_device),
+                            llm,
+                            training_device,
+                        )
+                        for predicted, target in zip(predicted_replay_logits, target_replay_logits[row_idx]):
+                            target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
+                            predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
+                            replay_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
                     if replay_losses:
                         replay_loss = torch.stack(replay_losses).mean()
-                loss = reconstruction_loss + (llm_loss_weight * llm_loss) + (replay_loss_weight * replay_loss)
+                loss = reconstruction_loss + (replay_loss_weight * replay_loss)
                 loss.backward()
                 opt.step()
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
-                llm_loss_total += float(llm_loss.detach().item())
-                llm_loss_batches += 1
                 replay_loss_total += float(replay_loss.detach().item())
                 replay_loss_batches += 1
                 if (
@@ -785,7 +706,6 @@ def train_temporal_lstm_autoencoder(
                     )
                 ):
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-                    partial_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
                     partial_replay_loss = replay_loss_total / max(replay_loss_batches, 1)
                     heartbeat = {
                         "event": "batch_heartbeat",
@@ -798,10 +718,9 @@ def train_temporal_lstm_autoencoder(
                         "batch_start": batch_start,
                         "batch_stop": batch_stop,
                         "training_method": "rae_temporal",
-                        "partial_loss": partial_reconstruction_loss + (llm_loss_weight * partial_llm_loss) + (replay_loss_weight * partial_replay_loss),
+                        "partial_loss": partial_reconstruction_loss + (replay_loss_weight * partial_replay_loss),
                         "partial_loss_components": {
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
-                            "frozen_llm_prompt_transition_kl": partial_llm_loss,
                             "teacher_forced_generation_replay_kl": partial_replay_loss,
                         },
                         "memory_gb": _current_memory_gb(),
@@ -814,9 +733,8 @@ def train_temporal_lstm_autoencoder(
                         flush=True,
                     )
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-            mean_llm_loss = llm_loss_total / max(llm_loss_batches, 1)
             mean_replay_loss = replay_loss_total / max(replay_loss_batches, 1)
-            mean_loss = mean_reconstruction_loss + (llm_loss_weight * mean_llm_loss) + (replay_loss_weight * mean_replay_loss)
+            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_replay_loss)
             mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
@@ -828,21 +746,20 @@ def train_temporal_lstm_autoencoder(
                 "loss": mean_loss,
                 "loss_components": {
                     "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
-                    "frozen_llm_prompt_transition_kl": mean_llm_loss,
                     "teacher_forced_generation_replay_kl": mean_replay_loss,
                 },
                 "method": "rae_temporal",
                 "masked_loss": True,
-                "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
+                "objective": "masked_temporal_reconstruction_mse_plus_optional_teacher_forced_generation_replay_kl",
                 "seq_len": model.max_tokens,
                 "token_dim": model.token_dim,
                 "valid_tokens": int(token_mask.sum().item()),
                 "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
-                "llm_loss_weight": llm_loss_weight,
-                "llm_steps": int(llm_steps),
+                "deprecated_llm_loss_weight": llm_loss_weight,
+                "deprecated_llm_steps": int(llm_steps),
                 "replay_loss_weight": replay_loss_weight,
                 "replay_loss_steps": int(replay_loss_steps),
-                "llm_gradients": llm is not None and (llm_loss_weight > 0 or replay_loss_weight > 0),
+                "replay_gradients": llm is not None and replay_loss_weight > 0,
                 "weight_decay": weight_decay,
                 "train_batch_size": batch_size,
                 "memory_gb": mem_gb,
@@ -853,7 +770,6 @@ def train_temporal_lstm_autoencoder(
                 print(
                     f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
                     f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
-                    f"llm_kl={event['loss_components']['frozen_llm_prompt_transition_kl']:.6g} "
                     f"replay_kl={event['loss_components']['teacher_forced_generation_replay_kl']:.6g} "
                     f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s "
                     f"mem={mem_gb:.2f}GB",
@@ -873,8 +789,8 @@ def train_temporal_lstm_autoencoder(
                     "seq_len": model.max_tokens,
                     "token_dim": model.token_dim,
                     "latest_event": event,
-                    "llm_loss_weight": llm_loss_weight,
-                    "llm_steps": int(llm_steps),
+                    "deprecated_llm_loss_weight": llm_loss_weight,
+                    "deprecated_llm_steps": int(llm_steps),
                     "replay_loss_weight": replay_loss_weight,
                     "replay_loss_steps": int(replay_loss_steps),
                     "weight_decay": weight_decay,
@@ -924,13 +840,12 @@ def train_temporal_lstm_autoencoder(
         "token_dim": model.token_dim,
         "weight_decay": weight_decay,
         "masked_loss": True,
-        "objective": "masked_temporal_reconstruction_mse_plus_optional_frozen_llm_prompt_transition_kl",
-        "kl_loss_weight": llm_loss_weight,
-        "frozen_llm_prompt_transition_kl_weight": llm_loss_weight,
-        "frozen_llm_prompt_transition_steps": int(llm_steps),
+        "objective": "masked_temporal_reconstruction_mse_plus_optional_teacher_forced_generation_replay_kl",
+        "deprecated_llm_loss_weight": llm_loss_weight,
+        "deprecated_llm_steps": int(llm_steps),
         "teacher_forced_generation_replay_kl_weight": replay_loss_weight,
         "teacher_forced_generation_replay_steps": int(replay_loss_steps),
-        "frozen_llm_gradients": llm_loss_weight > 0 or replay_loss_weight > 0,
+        "teacher_forced_generation_replay_gradients": replay_loss_weight > 0,
         "regularization": "adamw_weight_decay_only",
         "train_batch_size": batch_size,
         "decoder_conditioning": "latent_repeated_input_plus_learned_temporal_position",
@@ -1116,7 +1031,7 @@ def run_compression(
             "input_dim": float(x.shape[1]),
             "point_codec": 1.0,
             "training_log_written": 1.0 if progress_path.exists() else 0.0,
-            "frozen_llm_gradients": 1.0 if method in {"rae_temporal", "temporal_rae", "temporal_lstm"} and llm_loss_weight > 0 else 0.0,
+            "deprecated_frozen_prompt_transition_gradients": 0.0,
             "teacher_forced_generation_replay_gradients": 1.0
             if method in {"rae_temporal", "temporal_rae", "temporal_lstm"} and replay_loss_weight > 0
             else 0.0,

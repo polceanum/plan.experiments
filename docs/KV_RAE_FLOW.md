@@ -311,19 +311,21 @@ states:
 loss = MSE(original_temporal_cache, reconstructed_temporal_cache)
 ```
 
-When `--llm-loss-weight` is greater than zero, training adds a frozen-LLM
-prompt-transition KL term:
+When `--replay-loss-weight` is greater than zero, training adds a frozen-LLM
+teacher-forced replay KL term over generated reasoning tokens:
 
 ```text
 loss = reconstruction_mse
-     + llm_loss_weight * KL(
-         frozen_llm_logits(original_prefix_cache, next_prompt_token),
-         frozen_llm_logits(reconstructed_prefix_cache, next_prompt_token)
+     + replay_loss_weight * KL(
+         frozen_llm_logits(original_cache, next_original_generated_token),
+         frozen_llm_logits(reconstructed_cache, next_original_generated_token)
        )
 ```
 
 The LLM receives gradients through `past_key_values`, but all LLM parameters are
-frozen. Only the RAE encoder/decoder weights update.
+frozen. Only the RAE encoder/decoder weights update. The older prompt-prefix
+transition KL path is deprecated because it can reward matching prompt-state
+continuations rather than reconstructing the generated reasoning trajectory.
 
 ## Variable Source Lengths
 

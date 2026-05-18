@@ -135,8 +135,8 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     out = capsys.readouterr().out
     assert "--hidden-dim" in out
     assert "--num-layers" in out
-    assert "--llm-loss-weight" in out
-    assert "--llm-steps" in out
+    assert "--llm-loss-weight" not in out
+    assert "--llm-steps" not in out
     assert "--replay-loss-weight" in out
     assert "--replay-loss-steps" in out
     assert "rae_temporal" in out

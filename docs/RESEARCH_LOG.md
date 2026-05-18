@@ -608,3 +608,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Launch a separate MPS teacher-forced replay-KL run and compare checkpoint replay/faithfulness against the clean MSE-only epoch-10 baseline.
+
+## 2026-05-18 - Deprecate prompt-prefix KL objective
+
+### Worked
+
+- Removed the active prompt-prefix frozen-LLM KL path from temporal RAE training, kept zero-valued legacy CLI compatibility for old launch scripts, and documented teacher-forced generated-token replay KL as the replay-sensitive auxiliary objective. Cleaned stale derived artifacts from the original full attached run while preserving raw caches and records needed by the active replay run.
+
+### Did Not Work / Caveats
+
+- The active launchd replay process was already started before this cleanup, so it still prints the old frozen-loss startup label until the next run, but it was launched with llm_loss_weight=0 and replay_loss_weight=0.01.
+
+### Left To Do
+
+- Continue monitoring the replay-KL run for its first startup event, heartbeat rows, and epoch-10 checkpoint before rerunning reconstruction scans.
