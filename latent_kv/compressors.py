@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import json
 import os
 from pathlib import Path
@@ -348,6 +349,14 @@ def _current_memory_gb() -> float:
         return -1.0
 
 
+def _empty_device_cache(device: torch.device | str) -> None:
+    device_type = torch.device(device).type
+    if device_type == "mps" and hasattr(torch, "mps"):
+        torch.mps.empty_cache()
+    elif device_type == "cuda":
+        torch.cuda.empty_cache()
+
+
 @dataclass
 class RandomProjectionCompressor:
     input_dim: int
@@ -537,6 +546,10 @@ def train_temporal_lstm_autoencoder(
     checkpoint_dir: Path | None = None,
     heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
+    resume_checkpoint_path: Path | None = None,
+    grad_clip_norm: float = 0.0,
+    mps_empty_cache_every_batches: int = 0,
+    replay_loss_every_n_batches: int = 1,
 ) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
     torch.manual_seed(seed)
@@ -572,6 +585,20 @@ def train_temporal_lstm_autoencoder(
         num_layers=num_layers,
     ).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
+    resume_epoch = 0
+    if resume_checkpoint_path is not None:
+        checkpoint = torch.load(resume_checkpoint_path, map_location="cpu")
+        checkpoint_seq_len = int(checkpoint.get("seq_len", sequence.shape[1]))
+        checkpoint_token_dim = int(checkpoint.get("token_dim", sequence.shape[-1]))
+        if checkpoint_seq_len != int(sequence.shape[1]) or checkpoint_token_dim != int(sequence.shape[-1]):
+            raise ValueError(
+                "Resume checkpoint shape does not match current temporal matrix: "
+                f"checkpoint seq/token=({checkpoint_seq_len}, {checkpoint_token_dim}) "
+                f"current=({sequence.shape[1]}, {sequence.shape[-1]})"
+            )
+        model.load_state_dict(checkpoint["state_dict"])
+        resume_epoch = int(checkpoint.get("epoch") or 0)
+        print(f"[rae_temporal] Resumed model weights from epoch {resume_epoch}: {resume_checkpoint_path}", flush=True)
     llm = None
     tokenizer = None
     llm_bundles: list[dict[str, Any]] = []
@@ -620,6 +647,9 @@ def train_temporal_lstm_autoencoder(
                         "attention_mask": bundle.get("attention_mask"),
                     }
                 )
+                del original_cache, token_ids
+                if training_device.type == "mps":
+                    _empty_device_cache(training_device)
         print("[rae_temporal] Teacher-forced replay loss targets loaded.", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
@@ -647,11 +677,17 @@ def train_temporal_lstm_autoencoder(
         "log_every": log_every,
         "checkpoint_every": checkpoint_every,
         "heartbeat_every_batches": heartbeat_every_batches,
+        "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
+        "resume_epoch": resume_epoch,
+        "grad_clip_norm": float(grad_clip_norm),
+        "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+        "replay_loss_every_n_batches": int(replay_loss_every_n_batches),
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
     print("[rae_temporal] Startup event logged. Beginning training loop...", flush=True)
-    for epoch in range(1, epochs + 1):
+    replay_loss_every_n_batches = max(1, int(replay_loss_every_n_batches))
+    for epoch in range(resume_epoch + 1, epochs + 1):
         try:
             epoch_start = time.perf_counter()
             reconstruction_numerator = 0.0
@@ -669,7 +705,12 @@ def train_temporal_lstm_autoencoder(
                 reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
                 reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
                 replay_loss = reconstructed_norm.new_tensor(0.0)
-                if llm is not None and replay_loss_weight > 0:
+                replay_loss_active = (
+                    llm is not None
+                    and replay_loss_weight > 0
+                    and ((batch_index - 1) % replay_loss_every_n_batches == 0)
+                )
+                if replay_loss_active:
                     reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
                     replay_losses = []
                     for local_idx, row in enumerate(reconstructed_sequence):
@@ -690,8 +731,11 @@ def train_temporal_lstm_autoencoder(
                             replay_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
                     if replay_losses:
                         replay_loss = torch.stack(replay_losses).mean()
+                    del reconstructed_sequence, replay_losses
                 loss = reconstruction_loss + (replay_loss_weight * replay_loss)
                 loss.backward()
+                if grad_clip_norm and grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                 opt.step()
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
@@ -723,6 +767,7 @@ def train_temporal_lstm_autoencoder(
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
                             "teacher_forced_generation_replay_kl": partial_replay_loss,
                         },
+                        "replay_loss_every_n_batches": replay_loss_every_n_batches,
                         "memory_gb": _current_memory_gb(),
                     }
                     _append_training_event(progress_path, heartbeat)
@@ -732,6 +777,10 @@ def train_temporal_lstm_autoencoder(
                         f"elapsed={heartbeat['elapsed_s']:.1f}s",
                         flush=True,
                     )
+                del batch_normalized, batch_token_mask, batch_feature_mask, reconstructed_norm, reconstruction_loss, replay_loss, loss
+                if mps_empty_cache_every_batches > 0 and batch_index % int(mps_empty_cache_every_batches) == 0:
+                    gc.collect()
+                    _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
             mean_replay_loss = replay_loss_total / max(replay_loss_batches, 1)
             mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_replay_loss)
@@ -760,6 +809,9 @@ def train_temporal_lstm_autoencoder(
                 "replay_loss_weight": replay_loss_weight,
                 "replay_loss_steps": int(replay_loss_steps),
                 "replay_gradients": llm is not None and replay_loss_weight > 0,
+                "replay_loss_every_n_batches": replay_loss_every_n_batches,
+                "grad_clip_norm": float(grad_clip_norm),
+                "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                 "weight_decay": weight_decay,
                 "train_batch_size": batch_size,
                 "memory_gb": mem_gb,
@@ -793,6 +845,9 @@ def train_temporal_lstm_autoencoder(
                     "deprecated_llm_steps": int(llm_steps),
                     "replay_loss_weight": replay_loss_weight,
                     "replay_loss_steps": int(replay_loss_steps),
+                    "replay_loss_every_n_batches": replay_loss_every_n_batches,
+                    "grad_clip_norm": float(grad_clip_norm),
+                    "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                     "weight_decay": weight_decay,
                 }
                 checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
@@ -846,6 +901,11 @@ def train_temporal_lstm_autoencoder(
         "teacher_forced_generation_replay_kl_weight": replay_loss_weight,
         "teacher_forced_generation_replay_steps": int(replay_loss_steps),
         "teacher_forced_generation_replay_gradients": replay_loss_weight > 0,
+        "replay_loss_every_n_batches": replay_loss_every_n_batches,
+        "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
+        "resume_epoch": resume_epoch,
+        "grad_clip_norm": float(grad_clip_norm),
+        "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "regularization": "adamw_weight_decay_only",
         "train_batch_size": batch_size,
         "decoder_conditioning": "latent_repeated_input_plus_learned_temporal_position",
@@ -891,6 +951,10 @@ def run_compression(
     checkpoint_every: int = 0,
     heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
+    resume_checkpoint_path: Path | None = None,
+    grad_clip_norm: float = 0.0,
+    mps_empty_cache_every_batches: int = 0,
+    replay_loss_every_n_batches: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -899,7 +963,7 @@ def run_compression(
     method = method.lower()
 
     progress_path = artifact_dir / f"{method}_training.jsonl"
-    if progress_path.exists():
+    if progress_path.exists() and resume_checkpoint_path is None:
         progress_path.write_text("", encoding="utf-8")
     artifact: dict[str, Any] = {"method": method, "latent_dim": latent_dim}
     if method in {"random", "random_projection"}:
@@ -951,6 +1015,10 @@ def run_compression(
             checkpoint_dir=artifact_dir / f"{method}_checkpoints",
             heartbeat_every_batches=heartbeat_every_batches,
             train_batch_size=train_batch_size,
+            resume_checkpoint_path=resume_checkpoint_path,
+            grad_clip_norm=grad_clip_norm,
+            mps_empty_cache_every_batches=mps_empty_cache_every_batches,
+            replay_loss_every_n_batches=replay_loss_every_n_batches,
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")

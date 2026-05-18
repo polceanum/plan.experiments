@@ -308,6 +308,46 @@ def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
     assert "normalization_mean" in latest
 
 
+def test_temporal_rae_can_resume_from_checkpoint(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        checkpoint_every=1,
+        log_every=1,
+    )
+    checkpoint = tmp_path / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=2,
+        hidden_dim=5,
+        checkpoint_every=1,
+        log_every=1,
+        resume_checkpoint_path=checkpoint,
+        grad_clip_norm=1.0,
+        mps_empty_cache_every_batches=1,
+    )
+
+    latest = torch.load(tmp_path / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_latest.pt", map_location="cpu")
+    artifact = torch.load(tmp_path / "compressions" / "rae_temporal_artifact.pt", map_location="cpu")
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+
+    assert latest["epoch"] == 2
+    assert latest["grad_clip_norm"] == 1.0
+    assert artifact["resume_epoch"] == 1
+    assert artifact["resume_checkpoint_path"] == str(checkpoint)
+    assert any(row.get("resume_epoch") == 1 for row in training_rows)
+
+
 def test_temporal_rae_can_train_in_mini_batches(tmp_path: Path):
     _write_variable_length_run(tmp_path)
 

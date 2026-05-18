@@ -214,6 +214,10 @@ def cmd_compress(args: argparse.Namespace) -> int:
         checkpoint_every=args.checkpoint_every,
         heartbeat_every_batches=args.heartbeat_every_batches,
         train_batch_size=args.train_batch_size,
+        resume_checkpoint_path=Path(args.resume_checkpoint) if args.resume_checkpoint else None,
+        grad_clip_norm=args.grad_clip_norm,
+        mps_empty_cache_every_batches=args.mps_empty_cache_every_batches,
+        replay_loss_every_n_batches=args.replay_loss_every_n_batches,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -664,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--llm-steps", type=int, default=0, help=argparse.SUPPRESS)
     compress.add_argument("--replay-loss-weight", type=float, default=0.0, help="Weight for teacher-forced generated-token replay KL in rae_temporal training.")
     compress.add_argument("--replay-loss-steps", type=int, default=0, help="Generated reasoning tokens per cache for optional teacher-forced replay KL.")
+    compress.add_argument("--replay-loss-every-n-batches", type=int, default=1, help="For rae_temporal, compute replay KL every N mini-batches; skipped batches use reconstruction MSE only.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
     compress.add_argument(
@@ -673,6 +678,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="For rae_temporal, write intra-epoch heartbeat events every N mini-batches; 0 disables heartbeats.",
     )
     compress.add_argument("--train-batch-size", type=int, default=0, help="Mini-batch size for rae_temporal training; 0 uses all records at once.")
+    compress.add_argument("--resume-checkpoint", default=None, help="Resume rae_temporal model weights from a checkpoint and continue at checkpoint epoch + 1.")
+    compress.add_argument("--grad-clip-norm", type=float, default=0.0, help="Optional gradient clipping norm for learned codecs; 0 disables clipping.")
+    compress.add_argument("--mps-empty-cache-every-batches", type=int, default=0, help="For MPS training, call torch.mps.empty_cache every N mini-batches; 0 disables.")
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")

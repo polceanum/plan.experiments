@@ -139,12 +139,16 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--llm-steps" not in out
     assert "--replay-loss-weight" in out
     assert "--replay-loss-steps" in out
+    assert "--replay-loss-every-n-batches" in out
     assert "rae_temporal" in out
     assert "--weight-decay" in out
     assert "--log-every" in out
     assert "--checkpoint-every" in out
     assert "--heartbeat-every-batches" in out
     assert "--train-batch-size" in out
+    assert "--resume-checkpoint" in out
+    assert "--grad-clip-norm" in out
+    assert "--mps-empty-cache-every-batches" in out
 
 
 def test_attach_prompt_caches_help_lists_source_records(capsys):

@@ -636,3 +636,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Let the current prefix-replay run reach an early checkpoint, then decide whether to launch a separate full-replay or longer-prefix run after measuring speed and reconstruction faithfulness.
+
+## 2026-05-18 - Add temporal RAE resume and MPS cleanup
+
+### Worked
+
+- Added rae_temporal resume-from-checkpoint support, optional gradient clipping, periodic MPS cache cleanup, and an optional replay-loss batch subsampling knob. The epoch-12 MPS OOM was captured in the structured training log; epoch-10 checkpoint and PCA artifacts remain usable.
+
+### Did Not Work / Caveats
+
+- Batch size 2 still eventually OOMed inside teacher-forced replay KL on MPS, which points to memory accumulation/fragmentation from repeated frozen-LLM replay forwards rather than simple mini-batch size alone.
+
+### Left To Do
+
+- Relaunch from epoch 10 with batch size 1, gradient clipping, and per-batch MPS cache cleanup; use replay-loss subsampling only if OOMs persist.
