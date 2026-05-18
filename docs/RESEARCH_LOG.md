@@ -580,3 +580,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run a broader reconstruction scan on later checkpoints and add semantic/structural faithfulness checks before using reconstructed-correct pairs as interpretive evidence.
+
+## 2026-05-18 - Epoch 30 convincing reconstruction probe
+
+### Worked
+
+- Added a local prompt-faithfulness gate for reconstruction scans and interpolation endpoint filtering; epoch 30 latent artifacts were extracted and a 50-endpoint CPU probe completed with no replay failures.
+
+### Did Not Work / Caveats
+
+- The probe found 1 numeric-correct decoded reconstruction but 0 convincing reconstructions: the numeric-correct row reused almost none of the prompt-specific content and reasoned about a generic purchase instead of the source problem.
+
+### Left To Do
+
+- Rerun convincing reconstruction scans on later checkpoints; consider adding teacher-forced token/logit faithfulness or semantic overlap metrics before scaling interpolation endpoint selection.

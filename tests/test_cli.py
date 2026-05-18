@@ -100,6 +100,8 @@ def test_latent_interpolate_help_lists_replay_controls(capsys):
     assert "--selection" in out
     assert "--min-distance" in out
     assert "--max-distance" in out
+    assert "--reconstruction-scan" in out
+    assert "--require-convincing-reconstruction" in out
 
 
 def test_latent_reconstruction_scan_help_lists_controls(capsys):

@@ -8,6 +8,7 @@ from latent_kv.cache import CacheTuple, save_cache_bundle
 from latent_kv.latent_interpolation import (
     interpolate_latents,
     parse_alphas,
+    reconstruction_faithfulness,
     run_latent_interpolation,
     run_reconstruction_scan,
     select_interpolation_pairs,
@@ -29,6 +30,16 @@ def test_parse_alphas_and_interpolate_latents():
     z = interpolate_latents(a, b, 0.25)
 
     assert torch.allclose(z, torch.tensor([0.5, 2.5]))
+
+
+def test_reconstruction_faithfulness_rejects_right_number_wrong_story():
+    prompt = "Solve the math problem. Give the final numeric answer. Harry slept 9 hours. James slept 6 hours. How many more hours did Harry sleep?"
+    wrong_story = "There are 3 people in the group and each person gets a toy. The answer is 3."
+    faithful_story = "Harry slept 9 hours and James slept 6 hours, so Harry slept 3 more hours. The answer is 3."
+
+    assert not reconstruction_faithfulness(prompt, wrong_story, decoded_correct=True)["convincing"]
+    assert reconstruction_faithfulness(prompt, faithful_story, decoded_correct=True)["convincing"]
+    assert not reconstruction_faithfulness(prompt, faithful_story, decoded_correct=False)["convincing"]
 
 
 def test_select_interpolation_pairs_filters_correct_and_mixed_modes():
@@ -300,6 +311,52 @@ def test_run_latent_interpolation_can_filter_from_reconstruction_scan(tmp_path: 
     assert summary.eligible_endpoint_count == 2
 
 
+def test_run_latent_interpolation_can_require_convincing_scan_rows(tmp_path: Path, monkeypatch):
+    run_dir = _write_interpolation_run(tmp_path)
+    checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+    scan_path = run_dir / "analysis" / "scan" / "reconstruction_replays.jsonl"
+    scan_path.parent.mkdir(parents=True)
+    scan_path.write_text(
+        "\n".join(
+            [
+                '{"index": 0, "decoded_correct": true, "decoded_convincing": true, "replay_error": null}',
+                '{"index": 1, "decoded_correct": true, "decoded_convincing": true, "replay_error": null}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        interpolation,
+        "_load_checkpoint_model",
+        lambda path: (
+            _FakeRAE(),
+            {
+                "normalization_mean": torch.zeros(1, 1, 2),
+                "normalization_std": torch.ones(1, 1, 2),
+            },
+        ),
+    )
+    monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
+    monkeypatch.setattr(interpolation, "greedy_continue_from_loaded_bundle", lambda **kwargs: "The answer is 1")
+
+    summary = run_latent_interpolation(
+        run_dir,
+        checkpoint_path=checkpoint,
+        pairs=1,
+        alphas=[0.0, 1.0],
+        pair_mode="cross_category",
+        replay_device_name="cpu",
+        progress_every=0,
+        reconstruction_scan_path=scan_path,
+        require_convincing_reconstruction=True,
+    )
+
+    assert summary.pairs == 1
+    assert summary.require_convincing_reconstruction
+
+
 def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, monkeypatch):
     run_dir = _write_interpolation_run(tmp_path)
     checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
@@ -328,6 +385,9 @@ def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, mon
 
     assert summary.scanned == 2
     assert summary.solved_reconstructions == 1
+    assert summary.convincing_reconstructions == 0
     rows = (run_dir / "analysis" / "reconstruction_scan_epoch_1" / "reconstruction_replays.jsonl").read_text(encoding="utf-8")
     assert "decoded_correct" in rows
+    assert "decoded_convincing" in rows
+    assert "faithfulness" in rows
     assert "original_output" in rows

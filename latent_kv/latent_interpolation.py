@@ -58,6 +58,7 @@ class InterpolationSummary:
     artifacts: dict[str, str]
     reconstruction_scan_path: str | None = None
     eligible_endpoint_count: int | None = None
+    require_convincing_reconstruction: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class ReconstructionScanSummary:
     checkpoint_epoch: int | None
     scanned: int
     solved_reconstructions: int
+    convincing_reconstructions: int
     replay_failures: int
     max_new_tokens: int
     artifacts: dict[str, str]
@@ -255,17 +257,136 @@ def select_interpolation_pairs(
     return selected[:pairs]
 
 
-def _load_reconstructed_correct_indices(path: Path) -> set[int]:
+_FAITHFULNESS_STOPWORDS = {
+    "about",
+    "after",
+    "all",
+    "also",
+    "answer",
+    "are",
+    "assume",
+    "based",
+    "before",
+    "calculate",
+    "can",
+    "case",
+    "determine",
+    "does",
+    "each",
+    "final",
+    "find",
+    "first",
+    "for",
+    "from",
+    "get",
+    "give",
+    "given",
+    "has",
+    "have",
+    "how",
+    "into",
+    "let",
+    "math",
+    "many",
+    "more",
+    "need",
+    "next",
+    "number",
+    "out",
+    "problem",
+    "solve",
+    "step",
+    "than",
+    "that",
+    "the",
+    "then",
+    "there",
+    "this",
+    "total",
+    "using",
+    "what",
+    "when",
+    "where",
+    "which",
+    "will",
+    "with",
+}
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z][a-z0-9]+", text.lower())
+        if len(token) > 2 and token not in _FAITHFULNESS_STOPWORDS
+    }
+
+
+def _numeric_tokens(text: str) -> set[str]:
+    return set(re.findall(r"(?<![a-z0-9])-?\d+(?:\.\d+)?(?:/\d+)?(?![a-z0-9])", text.lower()))
+
+
+def reconstruction_faithfulness(prompt: str, decoded_output: str, decoded_correct: bool) -> dict[str, Any]:
+    """Heuristic guard against numeric-answer-only reconstructions.
+
+    This is deliberately conservative and local-only: a decoded continuation must be
+    verifier-correct, reuse enough prompt-specific content words, and preserve some
+    prompt numbers to be treated as an inspectable reconstructed plan.
+    """
+
+    problem = _problem_text(prompt)
+    prompt_tokens = _content_tokens(problem)
+    output_tokens = _content_tokens(decoded_output)
+    prompt_numbers = _numeric_tokens(problem)
+    output_numbers = _numeric_tokens(decoded_output)
+    token_overlap = len(prompt_tokens & output_tokens)
+    token_recall = token_overlap / max(len(prompt_tokens), 1)
+    number_overlap = len(prompt_numbers & output_numbers)
+    number_recall = 1.0 if not prompt_numbers else number_overlap / len(prompt_numbers)
+    output_token_count = len(output_tokens)
+    convincing = (
+        bool(decoded_correct)
+        and output_token_count >= 5
+        and token_overlap >= 2
+        and token_recall >= 0.18
+        and number_recall >= 0.5
+    )
+    return {
+        "convincing": convincing,
+        "prompt_content_tokens": sorted(prompt_tokens),
+        "decoded_content_tokens": sorted(output_tokens),
+        "content_token_overlap": token_overlap,
+        "content_token_recall": token_recall,
+        "prompt_numbers": sorted(prompt_numbers),
+        "decoded_numbers": sorted(output_numbers),
+        "number_overlap": number_overlap,
+        "number_recall": number_recall,
+        "decoded_content_token_count": output_token_count,
+        "rule": "decoded_correct && >=5 decoded content tokens && >=2 prompt-token overlap && >=0.18 token recall && >=0.5 number recall",
+    }
+
+
+def _load_reconstructed_correct_indices(path: Path, require_convincing: bool = False) -> set[int]:
     if not path.exists():
         raise FileNotFoundError(f"Missing reconstruction scan artifact: {path}")
     rows = read_jsonl(path)
-    indices = {
-        int(row["index"])
-        for row in rows
-        if bool(row.get("decoded_correct")) and row.get("replay_error") in {None, ""}
-    }
+    indices = set()
+    for row in rows:
+        if not bool(row.get("decoded_correct")) or row.get("replay_error") not in {None, ""}:
+            continue
+        if require_convincing:
+            convincing = row.get("decoded_convincing")
+            if convincing is None:
+                convincing = reconstruction_faithfulness(
+                    prompt=str(row.get("prompt") or ""),
+                    decoded_output=str(row.get("decoded_output") or ""),
+                    decoded_correct=bool(row.get("decoded_correct")),
+                )["convincing"]
+            if not convincing:
+                continue
+        indices.add(int(row["index"]))
     if not indices:
-        raise ValueError(f"No decoded-correct reconstruction endpoints found in {path}")
+        descriptor = "decoded-correct convincing" if require_convincing else "decoded-correct"
+        raise ValueError(f"No {descriptor} reconstruction endpoints found in {path}")
     return indices
 
 
@@ -665,6 +786,7 @@ def run_reconstruction_scan(
         output = ""
         parsed = None
         correct = False
+        faithfulness = None
         try:
             cache_override = _decode_latent_to_cache(
                 z=latents[idx].to(latent_device),
@@ -689,6 +811,12 @@ def run_reconstruction_scan(
             parsed, correct = verify_output(output, _record_to_example(record))
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+        decoded_correct = bool(correct) and error is None
+        faithfulness = reconstruction_faithfulness(
+            prompt=str(record.get("prompt") or ""),
+            decoded_output=output,
+            decoded_correct=decoded_correct,
+        )
         rows.append(
             {
                 "index": idx,
@@ -702,7 +830,9 @@ def run_reconstruction_scan(
                 "categories": annotation.get("categories"),
                 "decoded_output": output,
                 "decoded_parsed_answer": parsed,
-                "decoded_correct": bool(correct) and error is None,
+                "decoded_correct": decoded_correct,
+                "decoded_convincing": bool(faithfulness["convincing"]),
+                "faithfulness": faithfulness,
                 "cache_validation": validation_payload,
                 "replay_error": error,
                 "model_id": chosen_model,
@@ -726,6 +856,7 @@ def run_reconstruction_scan(
         checkpoint_epoch=checkpoint_epoch,
         scanned=len(rows),
         solved_reconstructions=sum(1 for row in rows if row.get("decoded_correct")),
+        convincing_reconstructions=sum(1 for row in rows if row.get("decoded_convincing")),
         replay_failures=sum(1 for row in rows if row.get("replay_error")),
         max_new_tokens=int(max_new_tokens),
         artifacts={"reconstruction_replays.jsonl": str(rows_path)},
@@ -752,6 +883,7 @@ def run_latent_interpolation(
     max_distance: float | None = None,
     max_prompt_overlap: float = 0.65,
     reconstruction_scan_path: Path | None = None,
+    require_convincing_reconstruction: bool = False,
 ) -> InterpolationSummary:
     analysis_dir, checkpoint_path, checkpoint_meta, latents, annotations, records, checkpoint_epoch = _load_interpolation_inputs(
         run_dir,
@@ -761,7 +893,14 @@ def run_latent_interpolation(
     alphas = alphas or list(DEFAULT_ALPHAS)
     output_dir = output_dir or analysis_dir / f"interpolations_epoch_{checkpoint_epoch or 'unknown'}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    eligible_indices = _load_reconstructed_correct_indices(reconstruction_scan_path) if reconstruction_scan_path is not None else None
+    eligible_indices = (
+        _load_reconstructed_correct_indices(
+            reconstruction_scan_path,
+            require_convincing=require_convincing_reconstruction,
+        )
+        if reconstruction_scan_path is not None
+        else None
+    )
 
     pairs_selected = select_interpolation_pairs(
         latents,
@@ -927,6 +1066,7 @@ def run_latent_interpolation(
         artifacts=artifacts,
         reconstruction_scan_path=str(reconstruction_scan_path) if reconstruction_scan_path is not None else None,
         eligible_endpoint_count=len(eligible_indices) if eligible_indices is not None else None,
+        require_convincing_reconstruction=bool(require_convincing_reconstruction),
     )
     write_json(output_dir / "interpolation_summary.json", asdict(summary))
     return summary

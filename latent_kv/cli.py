@@ -562,6 +562,7 @@ def cmd_latent_interpolate(args: argparse.Namespace) -> int:
         max_distance=args.max_distance,
         max_prompt_overlap=args.max_prompt_overlap,
         reconstruction_scan_path=Path(args.reconstruction_scan) if args.reconstruction_scan else None,
+        require_convincing_reconstruction=args.require_convincing_reconstruction,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -779,6 +780,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--reconstruction-scan",
         default=None,
         help="Optional reconstruction_replays.jsonl; when set, only decoded-correct endpoints from that scan are paired.",
+    )
+    latent_interpolate.add_argument(
+        "--require-convincing-reconstruction",
+        action="store_true",
+        help="With --reconstruction-scan, require endpoints to pass local prompt-faithfulness heuristics, not just numeric correctness.",
     )
     latent_interpolate.set_defaults(func=cmd_latent_interpolate)
 
