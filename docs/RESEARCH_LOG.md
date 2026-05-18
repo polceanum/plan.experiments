@@ -622,3 +622,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Continue monitoring the replay-KL run for its first startup event, heartbeat rows, and epoch-10 checkpoint before rerunning reconstruction scans.
+
+## 2026-05-18 - Clarify replay KL step budget
+
+### Worked
+
+- Documented that replay_loss_steps is the number of teacher-forced generated tokens supervised by replay KL, so the current replay_loss_steps=4 run is a prefix-replay experiment rather than full generated-chain replay.
+
+### Did Not Work / Caveats
+
+- Full reasoning replay supervision would require using most or all original generated tokens, which is likely much more expensive than the current four-step diagnostic.
+
+### Left To Do
+
+- Let the current prefix-replay run reach an early checkpoint, then decide whether to launch a separate full-replay or longer-prefix run after measuring speed and reconstruction faithfulness.

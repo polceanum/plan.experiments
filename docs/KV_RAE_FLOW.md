@@ -327,6 +327,17 @@ frozen. Only the RAE encoder/decoder weights update. The older prompt-prefix
 transition KL path is deprecated because it can reward matching prompt-state
 continuations rather than reconstructing the generated reasoning trajectory.
 
+`--replay-loss-steps` controls how many generated tokens receive this
+teacher-forced KL supervision. A small value, such as the current exploratory
+`4`, is a prefix-replay diagnostic: it checks whether the reconstructed cache
+induces the same first few generated-token transitions. It does not force a
+full reasoning replay. For GSM8K CoT records whose generations are often
+hundreds of tokens long, full replay supervision would require a much larger
+step budget, such as the original generation length or the collection cap. That
+is scientifically closer to "replay the whole reasoning process," but it is
+also much more expensive because each supervised token requires an additional
+frozen-LLM forward through the reconstructed cache.
+
 ## Variable Source Lengths
 
 Plan/cache sequences keep their original token lengths. Different prompts and
