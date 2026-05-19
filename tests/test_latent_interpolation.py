@@ -52,6 +52,14 @@ def test_candidate_plan_quality_does_not_require_endpoint_correctness():
     assert quality["potentially_solved"]
 
 
+def test_candidate_plan_quality_flags_token_cap_truncation():
+    output = "Let x be the number of books. First compute 21 - 3 = 18."
+
+    quality = candidate_plan_quality(output, replay_error=None, hit_max_tokens=True)
+
+    assert quality["appears_truncated"]
+
+
 def test_select_interpolation_pairs_filters_correct_and_mixed_modes():
     latents = torch.tensor(
         [
@@ -266,6 +274,7 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "endpoint_prompt" in rows
     assert "decoded_output" in rows
     assert "candidate_plan_quality" in rows
+    assert "replay_generation" in rows
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_sequences.md").exists()
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_candidate_plans.md").exists()
     transition_report = run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_plan_transition_tables.md"

@@ -366,7 +366,11 @@ def reconstruction_faithfulness(prompt: str, decoded_output: str, decoded_correc
     }
 
 
-def candidate_plan_quality(decoded_output: str, replay_error: str | None = None) -> dict[str, Any]:
+def candidate_plan_quality(
+    decoded_output: str,
+    replay_error: str | None = None,
+    hit_max_tokens: bool | None = None,
+) -> dict[str, Any]:
     """Lightweight triage for interpolated continuations as generated plans.
 
     This intentionally does not compare against endpoint targets. Interpolation
@@ -382,7 +386,9 @@ def candidate_plan_quality(decoded_output: str, replay_error: str | None = None)
     has_equation = bool(re.search(r"\d+\s*[-+*/=]\s*\d+|\\frac|=", normalized))
     has_answer_marker = bool(re.search(r"\b(the answer is|final answer|therefore|boxed)\b", lower))
     has_reasoning_marker = bool(re.search(r"\b(step|first|second|then|so|because|therefore|let)\b", lower))
-    appears_truncated = bool(re.search(r"\b(let'?s break|we need to determine|based on the information provided)\s*$", lower))
+    appears_truncated = bool(hit_max_tokens) or bool(
+        re.search(r"\b(let'?s break|we need to determine|based on the information provided)\s*$", lower)
+    )
     has_placeholder_drift = bool(re.search(r"\bpens each person\b", lower))
     inspectable = replay_error is None and word_count >= 24 and (has_reasoning_marker or has_equation)
     potentially_solved = inspectable and has_number and has_answer_marker and not appears_truncated
@@ -864,6 +870,9 @@ def _render_plan_transition_tables(pair_rows: list[dict[str, Any]], replay_rows:
                     labels.append("truncated")
                 if quality.get("has_placeholder_drift"):
                     labels.append("placeholder drift")
+                replay_generation = row.get("replay_generation") or {}
+                if replay_generation.get("hit_max_tokens"):
+                    labels.append("hit token cap")
                 if not labels:
                     labels.append("weak")
                 chunks.append(
@@ -1160,6 +1169,7 @@ def run_latent_interpolation(
                 validation_payload = None
                 error = None
                 output = ""
+                replay_generation = None
                 parsed = None
                 correct = False
                 try:
@@ -1175,18 +1185,28 @@ def run_latent_interpolation(
                     validation_payload = asdict(validation)
                     if not validation.valid:
                         raise ValueError(";".join(validation.errors))
-                    output = greedy_continue_from_loaded_bundle(
+                    replay_result = greedy_continue_from_loaded_bundle(
                         bundle=bundle,
                         model=replay_model,
                         tokenizer=tokenizer,
                         device=replay_device,
                         max_new_tokens=int(max_new_tokens or endpoint_record.get("generated_tokens") or 32),
                         cache_override=cache_override,
+                        return_metadata=True,
                     )
+                    if isinstance(replay_result, dict):
+                        output = str(replay_result.get("text") or "")
+                        replay_generation = replay_result
+                    else:
+                        output = str(replay_result)
                     parsed, correct = verify_output(output, _record_to_example(endpoint_record))
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
-                quality = candidate_plan_quality(output, replay_error=error)
+                quality = candidate_plan_quality(
+                    output,
+                    replay_error=error,
+                    hit_max_tokens=bool(replay_generation.get("hit_max_tokens")) if isinstance(replay_generation, dict) else None,
+                )
                 row = {
                     "pair_id": pair.pair_id,
                     "pair_type": pair.pair_type,
@@ -1206,6 +1226,7 @@ def run_latent_interpolation(
                     "decoded_parsed_answer": parsed,
                     "decoded_correct_for_endpoint": bool(correct) and error is None,
                     "candidate_plan_quality": quality,
+                    "replay_generation": replay_generation,
                     "cache_validation": validation_payload,
                     "replay_error": error,
                     "model_id": chosen_model,

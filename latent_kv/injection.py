@@ -47,7 +47,8 @@ def greedy_continue_from_loaded_bundle(
     max_new_tokens: int = 32,
     cache_override: CacheTuple | None = None,
     last_logits_override: torch.Tensor | None = None,
-) -> str:
+    return_metadata: bool = False,
+) -> str | dict[str, Any]:
     cache = cache_override if cache_override is not None else bundle["cache"]
     input_ids = bundle.get("input_ids")
     attention_mask = bundle.get("attention_mask")
@@ -69,6 +70,7 @@ def greedy_continue_from_loaded_bundle(
     repetition_penalty = float(getattr(getattr(model, "generation_config", None), "repetition_penalty", 1.0) or 1.0)
     token_history = input_ids.to(device)
 
+    stopped_on_eos = False
     for _ in range(max_new_tokens):
         scored_logits = _apply_repetition_penalty(next_logits, token_history, repetition_penalty)
         next_token = torch.argmax(scored_logits, dim=-1, keepdim=True)
@@ -94,8 +96,20 @@ def greedy_continue_from_loaded_bundle(
         past = outputs.past_key_values
         next_logits = outputs.logits[:, -1, :]
         if generated[-1] in eos_ids:
+            stopped_on_eos = True
             break
-    return tokenizer.decode(generated, skip_special_tokens=True)
+    decoded = tokenizer.decode(generated, skip_special_tokens=True)
+    if return_metadata:
+        return {
+            "text": decoded,
+            "generated_token_ids": generated,
+            "generated_tokens": len(generated),
+            "max_new_tokens": int(max_new_tokens),
+            "stopped_on_eos": stopped_on_eos,
+            "hit_max_tokens": len(generated) >= int(max_new_tokens) and not stopped_on_eos,
+            "stop_reason": "eos" if stopped_on_eos else "max_new_tokens",
+        }
+    return decoded
 
 
 @torch.no_grad()
