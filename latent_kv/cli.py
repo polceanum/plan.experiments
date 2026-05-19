@@ -26,6 +26,7 @@ from .latent_analysis import run_latent_analysis
 from .latent_interpolation import parse_alphas, run_latent_interpolation, run_reconstruction_scan
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
+from .prompt_decoder import export_prompt_decoder_dataset
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .replay_diagnostics import score_replay_fidelity
@@ -430,6 +431,7 @@ def cmd_collect_prompt_caches(args: argparse.Namespace) -> int:
         capture_hidden=args.capture_hidden or bool(config_cache.get("capture_hidden") or False),
         resume=args.resume,
         resolved_config=resolved,
+        cache_mode=args.cache_mode or str(config_cache.get("cache_mode") or "prompt"),
     )
     _write_basic_plots(Path(args.run))
     print(f"Wrote cache-backed prompt records to {args.run}")
@@ -446,6 +448,8 @@ def cmd_attach_prompt_caches(args: argparse.Namespace) -> int:
         layer_mode=args.layer_mode or "all",
         capture_hidden=args.capture_hidden,
         resume=args.resume,
+        cache_mode=args.cache_mode,
+        limit=args.limit,
     )
     _write_basic_plots(Path(args.run))
     extra = payload.get("extra", {})
@@ -588,6 +592,16 @@ def cmd_latent_reconstruction_scan(args: argparse.Namespace) -> int:
         max_new_tokens=args.max_new_tokens,
         limit=args.limit,
         progress_every=args.progress_every,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_latent_prompt_decoder_dataset(args: argparse.Namespace) -> int:
+    summary = export_prompt_decoder_dataset(
+        run_dir=Path(args.run),
+        analysis_dir=Path(args.analysis_dir),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -816,6 +830,15 @@ def build_parser() -> argparse.ArgumentParser:
     reconstruction_scan.add_argument("--progress-every", type=int, default=25, help="Print scan progress every N endpoints; 0 disables progress.")
     reconstruction_scan.set_defaults(func=cmd_latent_reconstruction_scan)
 
+    prompt_decoder_dataset = sub.add_parser(
+        "latent-prompt-decoder-dataset",
+        help="Export latent/problem-prompt pairs for training a prompt decoder head",
+    )
+    prompt_decoder_dataset.add_argument("--run", required=True)
+    prompt_decoder_dataset.add_argument("--analysis-dir", required=True, help="Directory containing checkpoint_latents.pt.")
+    prompt_decoder_dataset.add_argument("--output-dir", default=None, help="Output directory. Defaults to <analysis-dir>/prompt_decoder.")
+    prompt_decoder_dataset.set_defaults(func=cmd_latent_prompt_decoder_dataset)
+
     corruption = sub.add_parser(
         "corruption-sensitivity",
         help="Replay original-to-reconstructed cache interpolations to measure behavioural robustness",
@@ -880,6 +903,12 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_cache.add_argument("--seed", type=int, default=None)
     prompt_cache.add_argument("--max-new-tokens", type=int, default=None)
     prompt_cache.add_argument("--layer-mode", default=None, help="all, lower, middle, upper, or comma-separated indices")
+    prompt_cache.add_argument(
+        "--cache-mode",
+        default=None,
+        choices=["prompt", "trajectory"],
+        help="Capture prompt-only KV caches or full prompt+generated trajectory KV caches.",
+    )
     prompt_cache.add_argument("--capture-hidden", action="store_true")
     prompt_cache.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
     prompt_cache.set_defaults(func=cmd_collect_prompt_caches)
@@ -893,8 +922,15 @@ def build_parser() -> argparse.ArgumentParser:
     attach_cache.add_argument("--model-id", default=None)
     attach_cache.add_argument("--device", default=None)
     attach_cache.add_argument("--layer-mode", default=None, help="all, lower, middle, upper, or comma-separated indices")
+    attach_cache.add_argument(
+        "--cache-mode",
+        default="prompt",
+        choices=["prompt", "trajectory"],
+        help="Capture prompt-only caches or recapture full prompt+generated trajectory caches from source generation token ids.",
+    )
     attach_cache.add_argument("--capture-hidden", action="store_true")
     attach_cache.add_argument("--resume", action="store_true", help="Append missing examples and skip existing task IDs.")
+    attach_cache.add_argument("--limit", type=int, default=None, help="Optional source-record limit for smoke recapture runs.")
     attach_cache.set_defaults(func=cmd_attach_prompt_caches)
 
     log = sub.add_parser("log", help="Append a structured research-log entry")

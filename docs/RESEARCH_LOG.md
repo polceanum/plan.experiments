@@ -664,3 +664,31 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Rerun candidate-plan interpolation on a later checkpoint, or pause the training run briefly to run a faster MPS replay sweep with longer continuations; use candidate quality as the first filter before manual interpretation.
+
+## 2026-05-19 - Pivot to full-trajectory latent planning
+
+### Worked
+
+- Stopped the active prompt-cache replay-KL run after confirming it encoded prompt-prefix caches rather than full prompt+reasoning trajectories. Added trajectory cache collection via --cache-mode trajectory for both fresh prompt-cache collection and attaching caches to existing records with saved generation token IDs. Added latent-prompt-decoder-dataset to export latent/problem-prompt pairs for the prompt-decoder path.
+
+### Did Not Work / Caveats
+
+- The stopped run remains useful as a prompt-state continuation experiment, but it cannot validate full latent-plan interpolation because middle points do not expose their recovered problem prompts and the RAE was not trained on full reasoning trajectories.
+
+### Left To Do
+
+- Collect a new trajectory-cache dataset from the preserved Qwen records/generation token IDs, train a temporal RAE on full prompt+reasoning caches, and add an actual latent-to-prompt decoder head using the exported prompt-decoder dataset.
+
+## 2026-05-19 - Trajectory cache smoke recapture
+
+### Worked
+
+- Ran a one-record Qwen trajectory-cache recapture smoke from the preserved prompt-cache records. The source attached bundles lacked exact generation_token_ids, so trajectory recapture now falls back to tokenizing saved output_text and marks generation_token_source=tokenized_output_text. Smoke artifact has 422 total cache tokens: 128 prompt tokens plus 294 continuation tokens.
+
+### Did Not Work / Caveats
+
+- The fallback is not guaranteed byte-for-byte identical to the original generation token ids when text normalization differs, so future fresh collections should prefer --cache-mode trajectory at generation time to save exact token ids.
+
+### Left To Do
+
+- Use the trajectory smoke to launch a small full-trajectory RAE check before scaling to all 1,319 records.

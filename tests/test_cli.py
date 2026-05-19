@@ -35,6 +35,7 @@ def test_collect_prompt_caches_help_lists_config(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--config" in out
+    assert "--cache-mode" in out
     assert "--layer-mode" in out
     assert "--resume" in out
 
@@ -116,6 +117,16 @@ def test_latent_reconstruction_scan_help_lists_controls(capsys):
     assert "--limit" in out
 
 
+def test_latent_prompt_decoder_dataset_help_lists_controls(capsys):
+    try:
+        main(["latent-prompt-decoder-dataset", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--analysis-dir" in out
+    assert "--output-dir" in out
+
+
 def test_corruption_sensitivity_help_lists_alpha(capsys):
     try:
         main(["corruption-sensitivity", "--help"])
@@ -158,5 +169,7 @@ def test_attach_prompt_caches_help_lists_source_records(capsys):
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--source-records" in out
+    assert "--cache-mode" in out
+    assert "--limit" in out
     assert "--layer-mode" in out
     assert "--resume" in out

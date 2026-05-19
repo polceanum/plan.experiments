@@ -205,6 +205,57 @@ def capture_prompt_cache(
 
 
 @torch.no_grad()
+def capture_full_trajectory_cache(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    generation_token_ids: torch.Tensor,
+    device: torch.device,
+    layer_mode: str = "all",
+    capture_hidden: bool = False,
+    use_chat_template: bool = True,
+) -> tuple[CacheTuple, list[int], int, int, int, Any, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Capture the KV cache for prompt tokens plus generated reasoning tokens.
+
+    This is the cache target for full latent-plan trajectory experiments. The
+    prompt prefix and generated continuation are both part of the encoded cache.
+    """
+
+    encoded = encode_prompt_for_model(tokenizer, prompt, device, use_chat_template=use_chat_template)
+    prompt_input_ids = encoded["input_ids"]
+    generation_token_ids = generation_token_ids.reshape(1, -1).to(device)
+    trajectory_input_ids = torch.cat([prompt_input_ids, generation_token_ids], dim=-1)
+    attention_mask = torch.ones_like(trajectory_input_ids, device=device)
+    outputs = model(
+        input_ids=trajectory_input_ids,
+        attention_mask=attention_mask,
+        use_cache=True,
+        output_hidden_states=capture_hidden,
+        return_dict=True,
+    )
+    cache = normalize_past_key_values(outputs.past_key_values)
+    selected, selected_layers = select_layers(cache, layer_mode)
+    hidden = None
+    if capture_hidden and outputs.hidden_states is not None:
+        hidden = tuple(t.detach().cpu() for t in outputs.hidden_states)
+    prompt_tokens = int(prompt_input_ids.shape[-1])
+    generated_tokens = int(generation_token_ids.shape[-1])
+    total_tokens = int(trajectory_input_ids.shape[-1])
+    return (
+        selected,
+        selected_layers,
+        prompt_tokens,
+        generated_tokens,
+        total_tokens,
+        hidden,
+        trajectory_input_ids.detach().cpu(),
+        attention_mask.detach().cpu(),
+        outputs.logits[:, -1, :].detach().cpu(),
+        prompt_input_ids.detach().cpu(),
+    )
+
+
+@torch.no_grad()
 def generate_text(
     model: Any,
     tokenizer: Any,

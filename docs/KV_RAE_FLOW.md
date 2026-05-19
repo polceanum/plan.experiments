@@ -1,10 +1,23 @@
 # KV RAE End-to-End Flow
 
-This note describes the current `rae_temporal` point-codec path in the
-latent-KV planning prototype. The key contract is:
+This note describes the `rae_temporal` point-codec paths in the latent-KV
+planning prototype. The original prompt-cache path used this contract:
 
 ```text
-entire prompt KV-cache temporal sequence -> one latent plan point -> decoded KV-cache temporal sequence
+problem prompt KV-cache temporal sequence
+  -> one latent problem-state point
+  -> decoded KV-cache temporal sequence
+  -> local LLM continuation
+```
+
+This is useful, but it is not the full latent-plan trajectory experiment. The
+full-trajectory path we now want to test uses:
+
+```text
+problem prompt + generated reasoning KV-cache temporal sequence
+  -> one latent trajectory point
+  -> decoded KV-cache temporal sequence
+  -> replay/inspect recovered plan
 ```
 
 The RAE decoder reconstructs transformer KV state. It does not directly decode
@@ -40,7 +53,7 @@ still learns sequence-to-point-to-sequence reconstruction.
         +------------------------------------------------+
                                |
                                v
-        prompt KV-cache temporal sequence / planning trace
+        prompt KV-cache temporal sequence / problem state
         [state_1, state_2, ..., state_N]
 
         where state_t contains every selected layer/head K,V value
@@ -265,6 +278,63 @@ Problem
   -> verifier outcome
 ```
 
+This short version is the prompt-cache path. It compresses the problem state and
+then asks the LLM to generate a continuation from that state. Interpolating
+these points may produce changed problem states and therefore changed
+continuations, but there is no direct decoded problem prompt for the middle
+points. That makes it hard to judge whether an interpolated continuation is
+correct, because the problem it belongs to is latent.
+
+## Full-Trajectory Path
+
+For full latent-plan experiments, collect cache bundles with
+`--cache-mode trajectory`:
+
+```text
+Problem
+  -> prompt text
+  -> local LLM generates reasoning/answer tokens
+  -> concatenate prompt tokens + generated tokens
+  -> LLM forward pass over the full token sequence
+  -> full temporal KV-cache trajectory
+  -> RAE encodes/decodes the whole prompt+plan cache sequence
+```
+
+The resulting cache sequence includes both the problem prompt prefix and the
+generated reasoning continuation. This matches the scientific object:
+
+```text
+[problem statement, reasoning steps, answer]
+  -> one latent trajectory point
+  -> reconstructed [problem statement, reasoning steps, answer] cache state
+```
+
+The decoded cache is still not literally text by itself; KV caches are not
+invertible transcripts. But this path trains the bottleneck on the full
+trajectory rather than only the prompt prefix, so reconstructions and
+interpolations should preserve much more of the reasoning plan structure.
+
+## Prompt Decoder Path
+
+Prompt-cache interpolation can still be useful if we also learn to decode the
+problem prompt from each latent point:
+
+```text
+z -> prompt decoder head -> recovered problem prompt
+z -> RAE decoder -> KV problem state / trajectory state
+recovered prompt + decoded state -> generated plan
+```
+
+This gives interpolated points an inspectable problem statement. Then middle
+points can be evaluated as ordinary candidate tasks: does the decoded/recovered
+problem make sense, and does the generated plan solve that recovered problem?
+
+The first implementation artifact for this path is
+`latent-prompt-decoder-dataset`, which exports latent vectors paired with their
+source problem prompts. A later training step should add an actual
+latent-to-prompt decoder head and report prompt recovery quality before using
+it to judge interpolations.
+
 ## Two Decoders
 
 ```text
@@ -299,6 +369,12 @@ dataset labels and may represent different latent tasks or partial plans, so
 their outputs should be inspected for coherence, completeness, arithmetic
 self-consistency, and structural drift rather than forced agreement with either
 endpoint answer.
+
+This endpoint-context replay is an implementation limitation of the prompt-cache
+path: an interpolated prompt-state cache needs a prompt/logit context to become
+text. Conceptually, the latent line is still A -> alpha points -> B. If the same
+alpha renders differently under A and B contexts, treat that as instability or
+context dependence in the latent point.
 
 Interpolation artifacts should always preserve the endpoint prompts, original
 outputs, decoded intermediate outputs, alpha values, endpoint categories, and

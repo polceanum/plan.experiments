@@ -8,8 +8,10 @@ from typing import Any
 
 from .benchmarks import load_examples, verify_output
 from .cache import (
+    capture_full_trajectory_cache,
     capture_prompt_cache,
     choose_device,
+    load_cache_bundle,
     load_model_and_tokenizer,
     save_cache_bundle,
 )
@@ -21,6 +23,18 @@ from .schemas import CacheMetadata, TrajectoryRecord, append_jsonl, read_jsonl, 
 
 def _existing_task_ids(path: Path) -> set[str]:
     return {str(row.get("task_id")) for row in read_jsonl(path)}
+
+
+def _validate_cache_mode(cache_mode: str) -> str:
+    cache_mode = cache_mode.lower()
+    if cache_mode not in {"prompt", "trajectory"}:
+        raise ValueError(f"Unsupported cache_mode: {cache_mode}")
+    return cache_mode
+
+
+def _tokenize_output_text(tokenizer: Any, output_text: str):
+    tokenized = tokenizer(output_text, add_special_tokens=False, return_tensors="pt")
+    return tokenized["input_ids"]
 
 
 def run_prompt_cache_collection(
@@ -37,8 +51,10 @@ def run_prompt_cache_collection(
     capture_hidden: bool = False,
     resume: bool = False,
     resolved_config: ResolvedExperimentConfig | None = None,
+    cache_mode: str = "prompt",
 ) -> dict[str, Any]:
     baseline = baseline.lower()
+    cache_mode = _validate_cache_mode(cache_mode)
     run_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = run_dir / "caches"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -88,23 +104,49 @@ def run_prompt_cache_collection(
                 do_sample=False,
             )
             parsed, correct = verify_output(output_text, example)
-            (
-                cache,
-                selected_layers,
-                prompt_tokens,
-                hidden,
-                input_ids,
-                attention_mask,
-                last_logits,
-            ) = capture_prompt_cache(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt_used,
-                device=device,
-                layer_mode=layer_mode,
-                capture_hidden=capture_hidden,
-                use_chat_template=True,
-            )
+            if cache_mode == "trajectory":
+                (
+                    cache,
+                    selected_layers,
+                    prompt_tokens,
+                    cache_generated_tokens,
+                    cache_total_tokens,
+                    hidden,
+                    input_ids,
+                    attention_mask,
+                    last_logits,
+                    prompt_input_ids,
+                ) = capture_full_trajectory_cache(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt_used,
+                    generation_token_ids=generation_token_ids,
+                    device=device,
+                    layer_mode=layer_mode,
+                    capture_hidden=capture_hidden,
+                    use_chat_template=True,
+                )
+            else:
+                (
+                    cache,
+                    selected_layers,
+                    prompt_tokens,
+                    hidden,
+                    input_ids,
+                    attention_mask,
+                    last_logits,
+                ) = capture_prompt_cache(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt_used,
+                    device=device,
+                    layer_mode=layer_mode,
+                    capture_hidden=capture_hidden,
+                    use_chat_template=True,
+                )
+                cache_generated_tokens = 0
+                cache_total_tokens = prompt_tokens
+                prompt_input_ids = input_ids
         except Exception as exc:
             output_text = ""
             parsed = None
@@ -119,6 +161,9 @@ def run_prompt_cache_collection(
             attention_mask = None
             last_logits = None
             generation_token_ids = None
+            cache_generated_tokens = 0
+            cache_total_tokens = prompt_tokens
+            prompt_input_ids = None
             error = f"{type(exc).__name__}: {exc}"
 
         cache_path = None
@@ -132,7 +177,7 @@ def run_prompt_cache_collection(
                 layers=len(cache),
                 selected_layers=selected_layers,
                 selected_heads=None,
-                token_count=prompt_tokens,
+                token_count=cache_total_tokens,
                 cache_path=str(cache_path),
                 benchmark=example.benchmark,
                 task_id=example.task_id,
@@ -157,6 +202,11 @@ def run_prompt_cache_collection(
                     "do_sample": False,
                     "decoding_protocol": protocol_metadata["decoding_protocol"],
                     "seed": seed + idx,
+                    "cache_mode": cache_mode,
+                    "prompt_tokens": prompt_tokens,
+                    "cache_generated_tokens": cache_generated_tokens,
+                    "cache_total_tokens": cache_total_tokens,
+                    "prompt_input_ids": prompt_input_ids.tolist() if prompt_input_ids is not None else None,
                 },
             )
 
@@ -184,6 +234,9 @@ def run_prompt_cache_collection(
                 "prompt_family": protocol_metadata["prompt_family"],
                 "decoding_protocol": protocol_metadata["decoding_protocol"],
                 "cache_collection": True,
+                "cache_mode": cache_mode,
+                "cache_total_tokens": cache_total_tokens,
+                "cache_generated_tokens": cache_generated_tokens,
                 "cache_layer_mode": layer_mode,
                 "chat_template": uses_chat_template,
                 "local_files_only": True,
@@ -206,6 +259,7 @@ def run_prompt_cache_collection(
     extra[f"prompt_cache_{baseline}_protocol"] = protocol_metadata
     extra[f"prompt_cache_{baseline}_cache_dir"] = str(cache_dir)
     extra[f"prompt_cache_{baseline}_resume"] = resume
+    extra[f"prompt_cache_{baseline}_cache_mode"] = cache_mode
     write_json(run_dir / "metrics.json", payload)
     report = render_report(run_dir, read_jsonl(record_path), payload)
     (run_dir / "report.md").write_text(report, encoding="utf-8")
@@ -220,7 +274,10 @@ def run_existing_prompt_record_cache_collection(
     layer_mode: str = "all",
     capture_hidden: bool = False,
     resume: bool = False,
+    cache_mode: str = "prompt",
+    limit: int | None = None,
 ) -> dict[str, Any]:
+    cache_mode = _validate_cache_mode(cache_mode)
     run_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = run_dir / "caches"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +288,8 @@ def run_existing_prompt_record_cache_collection(
         record_path.write_text("", encoding="utf-8")
 
     source_rows = read_jsonl(source_records)
+    if limit is not None:
+        source_rows = source_rows[: int(limit)]
     completed = _existing_task_ids(record_path) if resume else set()
     device = choose_device(device_name)
     model, tokenizer = load_model_and_tokenizer(model_id, device, local_files_only=True)
@@ -248,23 +307,60 @@ def run_existing_prompt_record_cache_collection(
         start = time.perf_counter()
         error = None
         try:
-            (
-                cache,
-                selected_layers,
-                prompt_tokens,
-                hidden,
-                input_ids,
-                attention_mask,
-                last_logits,
-            ) = capture_prompt_cache(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt_used,
-                device=device,
-                layer_mode=layer_mode,
-                capture_hidden=capture_hidden,
-                use_chat_template=True,
-            )
+            if cache_mode == "trajectory":
+                source_cache_path = source.get("cache_path")
+                if not source_cache_path:
+                    raise ValueError("trajectory cache attachment requires source cache_path with generation_token_ids")
+                source_bundle = load_cache_bundle(Path(str(source_cache_path)))
+                generation_token_ids = source_bundle.get("generation_token_ids")
+                if generation_token_ids is None or int(generation_token_ids.numel()) == 0:
+                    generation_token_ids = _tokenize_output_text(tokenizer, str(source.get("output_text") or ""))
+                    generation_token_source = "tokenized_output_text"
+                else:
+                    generation_token_source = "source_generation_token_ids"
+                (
+                    cache,
+                    selected_layers,
+                    prompt_tokens,
+                    cache_generated_tokens,
+                    cache_total_tokens,
+                    hidden,
+                    input_ids,
+                    attention_mask,
+                    last_logits,
+                    prompt_input_ids,
+                ) = capture_full_trajectory_cache(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt_used,
+                    generation_token_ids=generation_token_ids,
+                    device=device,
+                    layer_mode=layer_mode,
+                    capture_hidden=capture_hidden,
+                    use_chat_template=True,
+                )
+            else:
+                (
+                    cache,
+                    selected_layers,
+                    prompt_tokens,
+                    hidden,
+                    input_ids,
+                    attention_mask,
+                    last_logits,
+                ) = capture_prompt_cache(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt_used,
+                    device=device,
+                    layer_mode=layer_mode,
+                    capture_hidden=capture_hidden,
+                    use_chat_template=True,
+                )
+                generation_token_ids = None
+                cache_generated_tokens = 0
+                cache_total_tokens = prompt_tokens
+                prompt_input_ids = input_ids
         except Exception as exc:
             cache = None
             selected_layers = []
@@ -273,6 +369,10 @@ def run_existing_prompt_record_cache_collection(
             input_ids = None
             attention_mask = None
             last_logits = None
+            generation_token_ids = None
+            cache_generated_tokens = 0
+            cache_total_tokens = prompt_tokens
+            prompt_input_ids = None
             error = f"{type(exc).__name__}: {exc}"
 
         cache_path = None
@@ -287,7 +387,7 @@ def run_existing_prompt_record_cache_collection(
                 layers=len(cache),
                 selected_layers=selected_layers,
                 selected_heads=None,
-                token_count=prompt_tokens,
+                token_count=cache_total_tokens,
                 cache_path=str(cache_path),
                 benchmark=source.get("benchmark"),
                 task_id=task_id,
@@ -306,13 +406,19 @@ def run_existing_prompt_record_cache_collection(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 last_logits=last_logits,
-                generation_token_ids=None,
+                generation_token_ids=generation_token_ids,
                 generation_config={
                     "max_new_tokens": source.get("generated_tokens"),
                     "decoding_protocol": metadata.get("decoding_protocol"),
                     "seed": source.get("seed"),
                     "source_records": str(source_records),
                     "attached_existing_output": True,
+                    "cache_mode": cache_mode,
+                    "generation_token_source": generation_token_source if cache_mode == "trajectory" else None,
+                    "prompt_tokens": prompt_tokens,
+                    "cache_generated_tokens": cache_generated_tokens,
+                    "cache_total_tokens": cache_total_tokens,
+                    "prompt_input_ids": prompt_input_ids.tolist() if prompt_input_ids is not None else None,
                 },
             )
 
@@ -336,6 +442,9 @@ def run_existing_prompt_record_cache_collection(
             metadata=metadata
             | {
                 "cache_collection": True,
+                "cache_mode": cache_mode,
+                "cache_total_tokens": cache_total_tokens,
+                "cache_generated_tokens": cache_generated_tokens,
                 "cache_attached_from_existing_record": True,
                 "cache_source_records": str(source_records),
                 "cache_layer_mode": layer_mode,
@@ -358,6 +467,7 @@ def run_existing_prompt_record_cache_collection(
     extra["prompt_cache_attached_source_records"] = str(source_records)
     extra["prompt_cache_attached_local_model"] = model_id
     extra["prompt_cache_attached_cache_dir"] = str(cache_dir)
+    extra["prompt_cache_attached_cache_mode"] = cache_mode
     extra["prompt_cache_attached_source_total"] = len(rows)
     extra["prompt_cache_attached_source_correct"] = sum(1 for row in rows if row.get("correct") is True)
     extra["prompt_cache_attached_source_incorrect"] = sum(1 for row in rows if row.get("correct") is not True)
