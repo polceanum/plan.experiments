@@ -623,6 +623,10 @@ def _excerpt(text: Any, limit: int = 420) -> str:
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
 
 
+def _markdown_code_block(text: Any) -> str:
+    return "````text\n" + str(text or "").strip() + "\n````"
+
+
 def _pair_reconstructions_solve(pair: dict[str, Any], pair_replay_rows: list[dict[str, Any]]) -> bool:
     del pair
     a_rows = [row for row in pair_replay_rows if row["replay_context"] == "a"]
@@ -808,6 +812,8 @@ def _render_plan_transition_tables(pair_rows: list[dict[str, Any]], replay_rows:
         "",
         "The endpoint originals are anchors. The decoded alpha rows are candidate plans generated from interpolated cache states and should be read for internal consistency, not forced endpoint-target correctness.",
         "",
+        "Tables give compact metadata. Full, untruncated plan text for every table row follows immediately below each table.",
+        "",
     ]
     for pair in pair_rows:
         pair_id = str(pair["pair_id"])
@@ -833,17 +839,18 @@ def _render_plan_transition_tables(pair_rows: list[dict[str, Any]], replay_rows:
                     "",
                     f"Decoded rows below are replayed under `{endpoint['task_id']}` prompt context.",
                     "",
-                    "| order | alpha | kind | context task | quality | parsed / endpoint match | plan text |",
+                    "| order | alpha | kind | context task | quality | parsed / endpoint match | text ref |",
                     "|---:|---:|---|---|---|---|---|",
                 ]
             )
+            full_text_blocks: list[tuple[int, str, str]] = []
 
             def append_anchor(order: int, kind: str, endpoint_row: dict[str, Any]) -> None:
-                text = _excerpt(endpoint_row.get("output_text"), 420).replace("|", "\\|")
                 chunks.append(
                     f"| {order} | - | {kind} | `{endpoint_row.get('task_id')}` target `{endpoint_row.get('target')}` | solved endpoint | "
-                    f"parsed `{endpoint_row.get('parsed_answer')}` / `{endpoint_row.get('correct')}` | {text} |"
+                    f"parsed `{endpoint_row.get('parsed_answer')}` / `{endpoint_row.get('correct')}` | full text below |"
                 )
+                full_text_blocks.append((order, kind, str(endpoint_row.get("output_text") or "")))
 
             append_anchor(0, "Endpoint A original", pair["a"])
             for order, row in enumerate(context_rows, start=1):
@@ -859,15 +866,17 @@ def _render_plan_transition_tables(pair_rows: list[dict[str, Any]], replay_rows:
                     labels.append("placeholder drift")
                 if not labels:
                     labels.append("weak")
-                text = _excerpt(row.get("decoded_output"), 420).replace("|", "\\|")
                 chunks.append(
                     f"| {order} | {float(row.get('alpha', 0.0)):.3f} | decoded/interpolated | "
                     f"`{row.get('endpoint_task_id')}` target `{row.get('endpoint_target')}` | "
                     f"{', '.join(labels)}; score `{quality.get('score')}` | "
-                    f"parsed `{row.get('decoded_parsed_answer')}` / `{row.get('decoded_correct_for_endpoint')}` | {text} |"
+                    f"parsed `{row.get('decoded_parsed_answer')}` / `{row.get('decoded_correct_for_endpoint')}` | full text below |"
                 )
+                full_text_blocks.append((order, f"alpha={float(row.get('alpha', 0.0)):.3f} decoded/interpolated", str(row.get("decoded_output") or "")))
             append_anchor(len(context_rows) + 1, "Endpoint B original", pair["b"])
-            chunks.append("")
+            chunks.extend(["", "Full row text:", ""])
+            for order, label, text in full_text_blocks:
+                chunks.extend([f"#### Row {order}: {label}", "", _markdown_code_block(text), ""])
     return "\n".join(chunks)
 
 
