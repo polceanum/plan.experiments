@@ -706,3 +706,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run a longer small trajectory RAE or scale trajectory recapture to a larger subset once we decide the fallback-tokenized outputs are acceptable; add full-trajectory-specific reconstruction/replay inspection rather than using prompt-continuation interpolation reports.
+
+## 2026-05-19 - All-layer full-trajectory RAE subset smoke
+
+### Worked
+
+- Fixed compact cache serialization so full-trajectory cache files no longer store giant tensor-view backing storage. Captured a 200-record all-layer prompt+reasoning trajectory subset and trained rae_temporal on MPS for 20 epochs without OOM. Training was monotonic: loss 0.96495 to 0.65132, checkpointing and PCA/category artifacts worked, and reconstruction scans replayed without runtime failures.
+
+### Did Not Work / Caveats
+
+- The epoch-20 decoded reconstructions are not yet semantically usable: a 20 solved-endpoint CPU scan found 0 solved and 0 convincing reconstructions, with outputs mostly blank or short generic fragments. This means interpolation artifacts would not be scientifically interpretable yet.
+
+### Left To Do
+
+- Continue all-layer trajectory training much longer or improve capacity/objective before interpolation; compare against upper-layer artifacts only as a feasibility side check, not as a clean global-state interpolation result.
