@@ -70,3 +70,30 @@ def test_cache_bundle_round_trip(tmp_path: Path):
     assert bundle["generation_config"] == {"max_new_tokens": 2}
     assert len(bundle["cache"]) == 2
 
+
+def test_cache_bundle_compacts_tensor_views(tmp_path: Path):
+    cache = fake_cache()
+    metadata = CacheMetadata(
+        model_id="model",
+        tokenizer_id="tok",
+        dtype="torch.float32",
+        device="cpu",
+        layers=2,
+        selected_layers=[0, 1],
+        selected_heads=None,
+        token_count=3,
+        cache_path=str(tmp_path / "cache.pt"),
+    )
+    logits_view = torch.randn(32, 128)[-1:]
+    assert logits_view.untyped_storage().nbytes() > logits_view.numel() * logits_view.element_size()
+
+    save_cache_bundle(
+        tmp_path / "cache.pt",
+        cache,
+        metadata,
+        last_logits=logits_view,
+    )
+
+    bundle = load_cache_bundle(tmp_path / "cache.pt")
+    saved_logits = bundle["last_logits"]
+    assert saved_logits.untyped_storage().nbytes() == saved_logits.numel() * saved_logits.element_size()

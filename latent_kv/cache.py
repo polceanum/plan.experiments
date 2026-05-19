@@ -40,7 +40,12 @@ def normalize_past_key_values(past: Any) -> CacheTuple:
     for layer in past:
         if not isinstance(layer, (tuple, list)) or len(layer) < 2:
             raise TypeError("Each cache layer must contain key and value tensors")
-        normalized.append((layer[0].detach().cpu(), layer[1].detach().cpu()))
+        normalized.append(
+            (
+                layer[0].detach().cpu().contiguous().clone(),
+                layer[1].detach().cpu().contiguous().clone(),
+            )
+        )
     return tuple(normalized)
 
 
@@ -102,6 +107,11 @@ def save_cache_bundle(
     generation_token_ids: torch.Tensor | None = None,
     generation_config: dict[str, Any] | None = None,
 ) -> None:
+    def compact_cpu(tensor: torch.Tensor | None) -> torch.Tensor | None:
+        if tensor is None:
+            return None
+        return tensor.detach().cpu().contiguous().clone()
+
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -109,10 +119,10 @@ def save_cache_bundle(
             "metadata": metadata.__dict__,
             "shapes": cache_shapes(cache),
             "hidden_states": hidden_states,
-            "input_ids": input_ids.detach().cpu() if input_ids is not None else None,
-            "attention_mask": attention_mask.detach().cpu() if attention_mask is not None else None,
-            "last_logits": last_logits.detach().cpu() if last_logits is not None else None,
-            "generation_token_ids": generation_token_ids.detach().cpu() if generation_token_ids is not None else None,
+            "input_ids": compact_cpu(input_ids),
+            "attention_mask": compact_cpu(attention_mask),
+            "last_logits": compact_cpu(last_logits),
+            "generation_token_ids": compact_cpu(generation_token_ids),
             "generation_config": generation_config or {},
         },
         path,
@@ -142,7 +152,10 @@ def load_model_and_tokenizer(model_id: str, device: torch.device, local_files_on
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=local_files_only)
-    model = AutoModelForCausalLM.from_pretrained(model_id, local_files_only=local_files_only)
+    model_kwargs = {"local_files_only": local_files_only}
+    if device.type == "mps":
+        model_kwargs["torch_dtype"] = torch.float16
+    model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
     model.to(device)
     model.eval()
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
