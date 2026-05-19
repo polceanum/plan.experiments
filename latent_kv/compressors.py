@@ -227,6 +227,16 @@ def _generation_tokens_for_replay(
     return torch.tensor(encoded[: max(0, int(steps))], dtype=torch.long)
 
 
+def _model_cache_dtype(model: Any) -> torch.dtype | None:
+    for parameter in model.parameters():
+        if parameter.is_floating_point():
+            return parameter.dtype
+    for buffer in model.buffers():
+        if buffer.is_floating_point():
+            return buffer.dtype
+    return None
+
+
 def _teacher_forced_generation_logits(
     bundle: dict[str, Any],
     cache: Any,
@@ -241,13 +251,14 @@ def _teacher_forced_generation_logits(
     if token_ids.numel() == 0:
         return []
     input_ids = input_ids.to(device)
+    cache_dtype = _model_cache_dtype(model)
     prompt_len = int(input_ids.shape[-1])
     current_mask = (
         attention_mask.to(device)
         if attention_mask is not None
         else torch.ones((1, prompt_len), dtype=torch.long, device=device)
     )
-    past = cache
+    past = cache_to_device(cache, device, dtype=cache_dtype)
     forward_parameters = _forward_parameters(model)
     logits_by_step: list[torch.Tensor] = []
     for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
