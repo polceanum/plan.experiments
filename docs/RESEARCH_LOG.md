@@ -765,3 +765,18 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Do not run interpolation as interpretive evidence from epoch 10; let the MSE-only trajectory RAE train longer and retry reconstruction scans at later checkpoints before adding replay-KL or interpolation sweeps.
+
+## 2026-05-19 - Scratch replay-KL trajectory RAE launch
+
+### Worked
+
+- Stopped the warm-start replay-KL branch, removed its bulky run directory, copied the solved498 full-trajectory caches into a clean scratch replay-KL run, and launched MPS training from random initialization.
+- Scratch run uses latent_dim=1024 hidden_dim=1024, lr=1e-4, replay_loss_weight=0.001, replay_loss_steps=2, replay_loss_every_n_batches=2, batch_size=1, grad_clip_norm=0.5, and checkpoints every 5 epochs.
+
+### Did Not Work / Caveats
+
+- The previous warm-start replay-KL branch was stable, but it was not the intended scratch experiment; it was removed to keep the active run unambiguous.
+
+### Left To Do
+
+- Monitor the scratch replay-KL run through its readable status/log files until replay target loading completes and epoch-1 heartbeats appear; compare early replay KL/MSE trends against the removed warm-start notes only as informal context.
