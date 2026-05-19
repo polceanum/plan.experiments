@@ -734,3 +734,18 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Let the MSE-only run reach an early checkpoint such as epoch 10, run reconstruction/PCA diagnostics, then resume from that checkpoint with conservative teacher-forced generated-token replay KL if reconstruction is stable.
+
+## 2026-05-19 - Inspectable temporal RAE training status
+
+### Worked
+
+- Added a training-status CLI that renders structured rae_temporal JSONL telemetry into a markdown status file and readable line-oriented log.
+- Started a lightweight launchd status mirror for the active solved498 run, refreshing the readable files every 30 seconds without touching training state.
+
+### Did Not Work / Caveats
+
+- The original launchd stdout/stderr files remain empty for the active training job because it was started through buffered conda run; the JSONL telemetry is the reliable source of truth.
+
+### Left To Do
+
+- Use conda run --no-capture-output and PYTHONUNBUFFERED=1 for future persistent training jobs, and keep the status mirror pattern for long runs.

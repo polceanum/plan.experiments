@@ -37,6 +37,28 @@ class TrainingCurveSummary:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class TrainingStatusSummary:
+    method: str
+    rows: int
+    current_event: str
+    current_epoch: int | None
+    total_epochs: int | None
+    current_batch: int | None
+    total_batches: int | None
+    current_loss: float | None
+    last_completed_epoch: int | None
+    last_completed_loss: float | None
+    memory_gb: float | None
+    replay_gradients: bool
+    training_log_path: str
+    status_path: str
+    readable_log_path: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _mean_or_none(values: list[float]) -> float | None:
     return mean(values) if values else None
 
@@ -122,3 +144,127 @@ def summarize_training_curve(run_dir: Path, method: str) -> TrainingCurveSummary
     extra[f"{prefix}_noise_ratio"] = summary.noise_ratio
     write_json(metrics_path, metrics)
     return summary
+
+
+def _format_float(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _row_loss(row: dict[str, Any]) -> float | None:
+    value = row.get("loss", row.get("partial_loss"))
+    if value is None:
+        return None
+    return float(value)
+
+
+def _human_log_line(row: dict[str, Any]) -> str | None:
+    if row.get("event") == "startup":
+        shape = row.get("temporal_matrix_shape")
+        return (
+            f"startup device={row.get('device')} epochs={row.get('epochs')} "
+            f"shape={shape} latent_dim={row.get('latent_dim')} hidden_dim={row.get('hidden_dim')} "
+            f"replay_weight={row.get('replay_loss_weight')} replay_steps={row.get('replay_loss_steps')}"
+        )
+    if row.get("event") == "batch_heartbeat":
+        return (
+            f"epoch {row.get('epoch')}/{row.get('epochs')} "
+            f"batch {row.get('batch')}/{row.get('batches')} "
+            f"partial_loss={_format_float(row.get('partial_loss'))} "
+            f"mse={_format_float((row.get('partial_loss_components') or {}).get('masked_temporal_reconstruction_mse'))} "
+            f"replay_kl={_format_float((row.get('partial_loss_components') or {}).get('teacher_forced_generation_replay_kl'))} "
+            f"memory_gb={_format_float(row.get('memory_gb'))} "
+            f"elapsed_s={_format_float(row.get('elapsed_s'))}"
+        )
+    if row.get("loss") is not None:
+        components = row.get("loss_components") or {}
+        return (
+            f"epoch {row.get('epoch')}/{row.get('epochs')} done "
+            f"loss={_format_float(row.get('loss'))} "
+            f"mse={_format_float(components.get('masked_temporal_reconstruction_mse'))} "
+            f"replay_kl={_format_float(components.get('teacher_forced_generation_replay_kl'))} "
+            f"memory_gb={_format_float(row.get('memory_gb'))} "
+            f"elapsed_s={_format_float(row.get('elapsed_s'))}"
+        )
+    return None
+
+
+def render_training_status(
+    run_dir: Path,
+    method: str = "rae_temporal",
+    status_path: Path | None = None,
+    readable_log_path: Path | None = None,
+) -> TrainingStatusSummary:
+    method = method.lower()
+    log_path = run_dir / "compressions" / f"{method}_training.jsonl"
+    if not log_path.exists():
+        raise FileNotFoundError(f"Missing training log: {log_path}")
+    rows = read_jsonl(log_path)
+    if not rows:
+        raise ValueError(f"No rows found in {log_path}")
+
+    last = rows[-1]
+    completed = [row for row in rows if row.get("loss") is not None]
+    last_completed = completed[-1] if completed else None
+    current_loss = _row_loss(last)
+    status_path = status_path or (run_dir / f"{method}_status.md")
+
+    recent_completed = completed[-8:]
+    lines = [
+        f"# {method} Training Status",
+        "",
+        f"Source log: `{log_path}`",
+        "",
+        f"- Current event: `{last.get('event', 'epoch')}`",
+        f"- Epoch: `{last.get('epoch')}/{last.get('epochs')}`",
+        f"- Batch: `{last.get('batch', '-')}/{last.get('batches', '-')}`",
+        f"- Current loss: `{_format_float(current_loss)}`",
+        f"- Memory GB: `{_format_float(last.get('memory_gb'))}`",
+        f"- Replay gradients: `{bool(last.get('replay_gradients', False))}`",
+        "",
+    ]
+    if last_completed is not None:
+        lines.extend(
+            [
+                f"- Last completed epoch: `{last_completed.get('epoch')}/{last_completed.get('epochs')}`",
+                f"- Last completed loss: `{_format_float(last_completed.get('loss'))}`",
+                "",
+                "## Recent Completed Epochs",
+                "",
+            ]
+        )
+        for row in recent_completed:
+            lines.append(
+                f"- epoch `{row.get('epoch')}`: loss `{_format_float(row.get('loss'))}`, "
+                f"memory `{_format_float(row.get('memory_gb'))}` GB"
+            )
+
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if readable_log_path is not None:
+        readable_log_path.parent.mkdir(parents=True, exist_ok=True)
+        readable_lines = [line for row in rows if (line := _human_log_line(row)) is not None]
+        readable_log_path.write_text("\n".join(readable_lines) + "\n", encoding="utf-8")
+
+    return TrainingStatusSummary(
+        method=method,
+        rows=len(rows),
+        current_event=str(last.get("event", "epoch")),
+        current_epoch=int(last["epoch"]) if last.get("epoch") is not None else None,
+        total_epochs=int(last["epochs"]) if last.get("epochs") is not None else None,
+        current_batch=int(last["batch"]) if last.get("batch") is not None else None,
+        total_batches=int(last["batches"]) if last.get("batches") is not None else None,
+        current_loss=current_loss,
+        last_completed_epoch=int(last_completed["epoch"]) if last_completed and last_completed.get("epoch") is not None else None,
+        last_completed_loss=float(last_completed["loss"]) if last_completed and last_completed.get("loss") is not None else None,
+        memory_gb=float(last["memory_gb"]) if last.get("memory_gb") is not None else None,
+        replay_gradients=bool(last.get("replay_gradients", False)),
+        training_log_path=str(log_path),
+        status_path=str(status_path),
+        readable_log_path=str(readable_log_path) if readable_log_path is not None else None,
+    )

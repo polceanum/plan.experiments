@@ -25,6 +25,30 @@ an answer string. The local LLM then performs normal autoregressive decoding
 from the reconstructed cache, and the task verifier decides whether that replay
 or generated continuation solved the problem.
 
+## Inspectable Training Logs
+
+Long `rae_temporal` runs write authoritative telemetry to
+`<run>/compressions/rae_temporal_training.jsonl`. Plain launchd stdout files may
+remain empty when the process is started through `conda run`, because stdout can
+be captured or buffered outside the training loop. Treat the JSONL file as the
+source of truth.
+
+For human inspection, render the JSONL into a compact markdown status file and a
+readable line-oriented log:
+
+```bash
+conda run -n orpheus python -m latent_kv training-status \
+  --run runs/<run_id> \
+  --method rae_temporal \
+  --output runs/<run_id>/rae_temporal_status.md \
+  --readable-log runs/<run_id>/rae_temporal_readable.log
+```
+
+Persistent runs should either use `conda run --no-capture-output` and
+`PYTHONUNBUFFERED=1` for direct stdout visibility, or run a tiny periodic
+`training-status` mirror alongside the training job. The mirror does not touch
+model state; it only rewrites the status/readable files from JSONL telemetry.
+
 During training, the local LLM may also be used as a frozen differentiable
 critic through teacher-forced generated-token replay KL. Gradients flow through
 reconstructed KV tensors into the RAE, but the LLM weights stay frozen. This is

@@ -34,7 +34,7 @@ from .research_log import append_research_log
 from .schemas import TrajectoryRecord, append_jsonl, read_json, read_jsonl, write_json
 from .target_checks import check_targets
 from .tot_baseline import run_tot_baseline
-from .training_diagnostics import summarize_training_curve
+from .training_diagnostics import render_training_status, summarize_training_curve
 
 
 SMOKE_MODEL = "EleutherAI/pythia-70m-deduped"
@@ -536,6 +536,19 @@ def cmd_training_curve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_training_status(args: argparse.Namespace) -> int:
+    import json
+
+    summary = render_training_status(
+        run_dir=Path(args.run),
+        method=args.method,
+        status_path=Path(args.output) if args.output else None,
+        readable_log_path=Path(args.readable_log) if args.readable_log else None,
+    )
+    print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_latent_analysis(args: argparse.Namespace) -> int:
     import json
 
@@ -769,6 +782,16 @@ def build_parser() -> argparse.ArgumentParser:
     training_curve.add_argument("--run", required=True)
     training_curve.add_argument("--method", required=True, help="Learned codec method, e.g. autoencoder or rae_temporal.")
     training_curve.set_defaults(func=cmd_training_curve)
+
+    training_status = sub.add_parser(
+        "training-status",
+        help="Render learned-codec JSONL training progress into human-readable status/log files",
+    )
+    training_status.add_argument("--run", required=True)
+    training_status.add_argument("--method", default="rae_temporal", help="Learned codec method, e.g. rae_temporal.")
+    training_status.add_argument("--output", default=None, help="Markdown status output. Defaults to <run>/<method>_status.md.")
+    training_status.add_argument("--readable-log", default=None, help="Optional human-readable log output rendered from JSONL.")
+    training_status.set_defaults(func=cmd_training_status)
 
     latent_analysis = sub.add_parser(
         "latent-analysis",
