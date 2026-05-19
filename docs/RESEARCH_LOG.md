@@ -749,3 +749,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use conda run --no-capture-output and PYTHONUNBUFFERED=1 for future persistent training jobs, and keep the status mirror pattern for long runs.
+
+## 2026-05-19 - Epoch 10 solved-only trajectory RAE analysis
+
+### Worked
+
+- Generated epoch-10 latent/PCA artifacts for runs/qwen_cache_cot_full_trajectory_all_solved498: 498 solved full-trajectory records, checkpoint epoch 10, PCA explained variance ratios PC1=0.6662 and PC2=0.2013.
+- Ran a CPU reconstruction probe on 25 decoded endpoints with 192-token budget; cache validation passed with no replay runtime failures.
+- Exported the epoch-10 latent-to-prompt-decoder dataset with 498 rows for the future problem-decoder path.
+
+### Did Not Work / Caveats
+
+- Epoch-10 decoded reconstructions are not semantically usable yet: 0/25 solved, 0/25 convincing, 22/25 empty outputs, and the remaining outputs were very short/generic fragments.
+
+### Left To Do
+
+- Do not run interpolation as interpretive evidence from epoch 10; let the MSE-only trajectory RAE train longer and retry reconstruction scans at later checkpoints before adding replay-KL or interpolation sweeps.
