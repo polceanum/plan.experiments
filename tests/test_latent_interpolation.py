@@ -268,6 +268,11 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "candidate_plan_quality" in rows
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_sequences.md").exists()
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_candidate_plans.md").exists()
+    transition_report = run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_plan_transition_tables.md"
+    assert transition_report.exists()
+    assert "Endpoint A original -> decoded/interpolated alpha rows -> Endpoint B original" in transition_report.read_text(
+        encoding="utf-8"
+    )
     report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").read_text(encoding="utf-8")
     assert "Endpoint A solved plan" in report
     assert "Decoded A reconstruction" in report
