@@ -692,3 +692,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use the trajectory smoke to launch a small full-trajectory RAE check before scaling to all 1,319 records.
+
+## 2026-05-19 - Full-trajectory RAE smoke10
+
+### Worked
+
+- Recaptured 10 Qwen GSM8K CoT records as full prompt+generated-reasoning trajectory caches using --cache-mode trajectory. Token lengths ranged from 259 to 487 total tokens, with 89-174 prompt tokens and 161-320 continuation tokens. A 20-epoch MPS temporal RAE smoke with latent_dim=256, hidden_dim=256, batch_size=1 completed without OOM, using tensor shape [10, 487, 6144] and about 0.97GB MPS memory. Training loss decreased from 1.00148 to 0.96076, and epoch-20 latent/PCA plus prompt-decoder dataset artifacts were generated.
+
+### Did Not Work / Caveats
+
+- This was only a plumbing/convergence smoke: reconstruction loss remains high, the dataset has only 10 records, and exact original generation token IDs were unavailable for old attached records, so continuation tokens were reconstructed by tokenizing saved output text.
+
+### Left To Do
+
+- Run a longer small trajectory RAE or scale trajectory recapture to a larger subset once we decide the fallback-tokenized outputs are acceptable; add full-trajectory-specific reconstruction/replay inspection rather than using prompt-continuation interpolation reports.
