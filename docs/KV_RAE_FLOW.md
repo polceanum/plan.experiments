@@ -293,14 +293,20 @@ z_alpha -> reconstructed KV cache sequence
 The decoded cache is then replayed under endpoint prompt contexts. In the
 current workflow every interpolation step is replayed once with A's prompt
 tokens/logits and once with B's prompt tokens/logits. Automated correctness is
-only checked against the endpoint target for that replay context. Intermediate
-points have no dataset labels, so their outputs must be inspected as transition
-evidence rather than benchmark examples.
+only checked against the endpoint target for that replay context, and this is
+not the main success criterion for middle points. Intermediate points have no
+dataset labels and may represent different latent tasks or partial plans, so
+their outputs should be inspected for coherence, completeness, arithmetic
+self-consistency, and structural drift rather than forced agreement with either
+endpoint answer.
 
 Interpolation artifacts should always preserve the endpoint prompts, original
 outputs, decoded intermediate outputs, alpha values, endpoint categories, and
-cache-validation status. This makes it possible to review whether the path
-appears to preserve, blend, or corrupt reasoning structure.
+cache-validation status. Candidate-plan reports should also include local
+quality flags, such as whether the continuation is inspectable, appears
+truncated, contains arithmetic structure, or drifts into a generic placeholder
+template. This makes it possible to review whether the path appears to preserve,
+blend, or corrupt reasoning structure.
 
 ## Training Objective
 

@@ -6,6 +6,7 @@ import torch
 import latent_kv.latent_interpolation as interpolation
 from latent_kv.cache import CacheTuple, save_cache_bundle
 from latent_kv.latent_interpolation import (
+    candidate_plan_quality,
     interpolate_latents,
     parse_alphas,
     reconstruction_faithfulness,
@@ -40,6 +41,15 @@ def test_reconstruction_faithfulness_rejects_right_number_wrong_story():
     assert not reconstruction_faithfulness(prompt, wrong_story, decoded_correct=True)["convincing"]
     assert reconstruction_faithfulness(prompt, faithful_story, decoded_correct=True)["convincing"]
     assert not reconstruction_faithfulness(prompt, faithful_story, decoded_correct=False)["convincing"]
+
+
+def test_candidate_plan_quality_does_not_require_endpoint_correctness():
+    output = "Let x be the number of books. First compute 21 - 3 = 18. Then 18 / 2 = 9. Therefore, the answer is 9."
+
+    quality = candidate_plan_quality(output, replay_error=None)
+
+    assert quality["inspectable"]
+    assert quality["potentially_solved"]
 
 
 def test_select_interpolation_pairs_filters_correct_and_mixed_modes():
@@ -255,7 +265,9 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert '"replay_context": "b"' in rows
     assert "endpoint_prompt" in rows
     assert "decoded_output" in rows
+    assert "candidate_plan_quality" in rows
     assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_sequences.md").exists()
+    assert (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_candidate_plans.md").exists()
     report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").read_text(encoding="utf-8")
     assert "Endpoint A solved plan" in report
     assert "Decoded A reconstruction" in report

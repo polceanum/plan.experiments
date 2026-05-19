@@ -650,3 +650,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Relaunch from epoch 10 with batch size 1, gradient clipping, and per-batch MPS cache cleanup; use replay-loss subsampling only if OOMs persist.
+
+## 2026-05-19 - Epoch 20 interpolation candidate-plan framing
+
+### Worked
+
+- Generated epoch-20 latent/PCA artifacts and a CPU-safe tiny interpolation rerun with candidate-plan quality reporting. Added per-row quality flags and a human-readable candidate-plan report so interpolation middle points are judged for coherence and completeness rather than endpoint target correctness.
+
+### Did Not Work / Caveats
+
+- A longer CPU replay sample with 128-token continuations was too slow while MPS training remained active and was stopped before producing rows. The tiny epoch-20 sample produced no inspectable candidate plans: all six rows showed placeholder drift and most were truncated.
+
+### Left To Do
+
+- Rerun candidate-plan interpolation on a later checkpoint, or pause the training run briefly to run a faster MPS replay sweep with longer continuations; use candidate quality as the first filter before manual interpretation.

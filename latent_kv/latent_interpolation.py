@@ -55,6 +55,7 @@ class InterpolationSummary:
     pair_type_counts: dict[str, int]
     replay_failures: int
     accuracy_by_context_alpha: dict[str, dict[str, float]]
+    candidate_quality_summary: dict[str, Any]
     artifacts: dict[str, str]
     reconstruction_scan_path: str | None = None
     eligible_endpoint_count: int | None = None
@@ -362,6 +363,51 @@ def reconstruction_faithfulness(prompt: str, decoded_output: str, decoded_correc
         "number_recall": number_recall,
         "decoded_content_token_count": output_token_count,
         "rule": "decoded_correct && >=5 decoded content tokens && >=2 prompt-token overlap && >=0.18 token recall && >=0.5 number recall",
+    }
+
+
+def candidate_plan_quality(decoded_output: str, replay_error: str | None = None) -> dict[str, Any]:
+    """Lightweight triage for interpolated continuations as generated plans.
+
+    This intentionally does not compare against endpoint targets. Interpolation
+    points may be valid generated reasoning traces even when they do not solve
+    either endpoint task.
+    """
+
+    output = str(decoded_output or "")
+    normalized = " ".join(output.split())
+    lower = normalized.lower()
+    word_count = len(normalized.split())
+    has_number = bool(re.search(r"[-+]?\d+(?:\.\d+)?", normalized))
+    has_equation = bool(re.search(r"\d+\s*[-+*/=]\s*\d+|\\frac|=", normalized))
+    has_answer_marker = bool(re.search(r"\b(the answer is|final answer|therefore|boxed)\b", lower))
+    has_reasoning_marker = bool(re.search(r"\b(step|first|second|then|so|because|therefore|let)\b", lower))
+    appears_truncated = bool(re.search(r"\b(let'?s break|we need to determine|based on the information provided)\s*$", lower))
+    has_placeholder_drift = bool(re.search(r"\bpens each person\b", lower))
+    inspectable = replay_error is None and word_count >= 24 and (has_reasoning_marker or has_equation)
+    potentially_solved = inspectable and has_number and has_answer_marker and not appears_truncated
+    score = sum(
+        [
+            int(word_count >= 24),
+            int(has_reasoning_marker),
+            int(has_equation),
+            int(has_number),
+            int(has_answer_marker),
+            int(not appears_truncated),
+            int(not has_placeholder_drift),
+        ]
+    )
+    return {
+        "word_count": word_count,
+        "has_number": has_number,
+        "has_equation": has_equation,
+        "has_answer_marker": has_answer_marker,
+        "has_reasoning_marker": has_reasoning_marker,
+        "appears_truncated": appears_truncated,
+        "has_placeholder_drift": has_placeholder_drift,
+        "inspectable": inspectable,
+        "potentially_solved": potentially_solved,
+        "score": score,
     }
 
 
@@ -697,6 +743,58 @@ def _render_inspection_report(
     return "\n".join(chunks)
 
 
+def _render_candidate_plan_report(pair_rows: list[dict[str, Any]], replay_rows: list[dict[str, Any]]) -> str:
+    rows_by_pair: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in replay_rows:
+        rows_by_pair[str(row["pair_id"])].append(row)
+    chunks = [
+        "# Interpolated Candidate Plans",
+        "",
+        "This report treats interpolation rows as generated candidate reasoning traces.",
+        "Endpoint correctness anchors the endpoints only; middle rows are judged by local coherence and completeness, not by whether they answer endpoint A or B.",
+        "",
+    ]
+    for pair in pair_rows:
+        pair_id = str(pair["pair_id"])
+        chunks.extend(
+            [
+                f"## {pair_id}: {pair['a']['task_id']} -> {pair['b']['task_id']}",
+                "",
+                f"**A endpoint solved**: target `{pair['a']['target']}`, parsed `{pair['a']['parsed_answer']}`, category `{pair['a']['primary_category']}`",
+                "",
+                f"**A problem**: {_excerpt(_problem_text(pair['a']['prompt']), 420)}",
+                "",
+                f"**B endpoint solved**: target `{pair['b']['target']}`, parsed `{pair['b']['parsed_answer']}`, category `{pair['b']['primary_category']}`",
+                "",
+                f"**B problem**: {_excerpt(_problem_text(pair['b']['prompt']), 420)}",
+                "",
+                "| alpha | context | quality | endpoint target match | parsed | candidate continuation |",
+                "|---:|---|---|---|---|---|",
+            ]
+        )
+        for row in sorted(rows_by_pair[pair_id], key=lambda item: (float(item["alpha"]), str(item["replay_context"]))):
+            quality = row.get("candidate_plan_quality") or {}
+            labels = []
+            if quality.get("potentially_solved"):
+                labels.append("potentially solved")
+            if quality.get("inspectable"):
+                labels.append("inspectable")
+            if quality.get("appears_truncated"):
+                labels.append("truncated")
+            if quality.get("has_placeholder_drift"):
+                labels.append("placeholder drift")
+            if not labels:
+                labels.append("weak")
+            text = _excerpt(row.get("decoded_output"), 340).replace("|", "\\|")
+            chunks.append(
+                f"| {float(row.get('alpha', 0.0)):.3f} | {row.get('replay_context')} | "
+                f"{', '.join(labels)}; score `{quality.get('score')}` | "
+                f"`{row.get('decoded_correct_for_endpoint')}` | `{row.get('decoded_parsed_answer')}` | {text} |"
+            )
+        chunks.append("")
+    return "\n".join(chunks)
+
+
 def _accuracy_by_context_alpha(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[bool]] = defaultdict(list)
     for row in rows:
@@ -705,6 +803,21 @@ def _accuracy_by_context_alpha(rows: list[dict[str, Any]]) -> dict[str, dict[str
     return {
         key: {"rows": len(values), "accuracy": sum(values) / len(values)}
         for key, values in sorted(grouped.items())
+    }
+
+
+def _candidate_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    qualities = [row.get("candidate_plan_quality") or {} for row in rows]
+    total = len(qualities)
+    if total == 0:
+        return {"rows": 0, "inspectable": 0, "potentially_solved": 0, "mean_score": 0.0}
+    return {
+        "rows": total,
+        "inspectable": sum(1 for quality in qualities if quality.get("inspectable")),
+        "potentially_solved": sum(1 for quality in qualities if quality.get("potentially_solved")),
+        "truncated": sum(1 for quality in qualities if quality.get("appears_truncated")),
+        "placeholder_drift": sum(1 for quality in qualities if quality.get("has_placeholder_drift")),
+        "mean_score": sum(float(quality.get("score", 0.0)) for quality in qualities) / total,
     }
 
 
@@ -988,6 +1101,7 @@ def run_latent_interpolation(
                     parsed, correct = verify_output(output, _record_to_example(endpoint_record))
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
+                quality = candidate_plan_quality(output, replay_error=error)
                 row = {
                     "pair_id": pair.pair_id,
                     "pair_type": pair.pair_type,
@@ -1006,6 +1120,7 @@ def run_latent_interpolation(
                     "decoded_output": output,
                     "decoded_parsed_answer": parsed,
                     "decoded_correct_for_endpoint": bool(correct) and error is None,
+                    "candidate_plan_quality": quality,
                     "cache_validation": validation_payload,
                     "replay_error": error,
                     "model_id": chosen_model,
@@ -1031,6 +1146,7 @@ def run_latent_interpolation(
     sequence_path = output_dir / "interpolation_sequences.md"
     inspection_path = output_dir / "interpolation_inspection.md"
     solved_inspection_path = output_dir / "interpolation_inspection_solved_reconstructions.md"
+    candidate_plan_path = output_dir / "interpolation_candidate_plans.md"
     _jsonl_write(pairs_path, pair_rows)
     _jsonl_write(replays_path, replay_rows)
     sequence_path.write_text(_render_sequences(pair_rows, replay_rows), encoding="utf-8")
@@ -1039,6 +1155,7 @@ def run_latent_interpolation(
         _render_inspection_report(pair_rows, replay_rows, solved_reconstructions_only=True),
         encoding="utf-8",
     )
+    candidate_plan_path.write_text(_render_candidate_plan_report(pair_rows, replay_rows), encoding="utf-8")
     plot_path = _plot_interpolation_accuracy(replay_rows, output_dir)
 
     artifacts = {
@@ -1047,6 +1164,7 @@ def run_latent_interpolation(
         "interpolation_sequences.md": str(sequence_path),
         "interpolation_inspection.md": str(inspection_path),
         "interpolation_inspection_solved_reconstructions.md": str(solved_inspection_path),
+        "interpolation_candidate_plans.md": str(candidate_plan_path),
     }
     if plot_path is not None:
         artifacts["interpolation_accuracy_by_alpha.png"] = plot_path
@@ -1063,6 +1181,7 @@ def run_latent_interpolation(
         pair_type_counts=dict(sorted(Counter(row["pair_type"] for row in pair_rows).items())),
         replay_failures=sum(1 for row in replay_rows if row.get("replay_error")),
         accuracy_by_context_alpha=_accuracy_by_context_alpha(replay_rows),
+        candidate_quality_summary=_candidate_quality_summary(replay_rows),
         artifacts=artifacts,
         reconstruction_scan_path=str(reconstruction_scan_path) if reconstruction_scan_path is not None else None,
         eligible_endpoint_count=len(eligible_indices) if eligible_indices is not None else None,
