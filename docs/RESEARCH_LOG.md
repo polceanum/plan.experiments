@@ -720,3 +720,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Continue all-layer trajectory training much longer or improve capacity/objective before interpolation; compare against upper-layer artifacts only as a feasibility side check, not as a clean global-state interpolation result.
+
+## 2026-05-19 - Solved-only all-layer trajectory RAE launch
+
+### Worked
+
+- Cleaned stale smoke/probe and prompt-prefix artifacts, preserved source records inside the active run, recaptured 498 source-correct Qwen GSM8K CoT plans as all-layer full prompt+reasoning trajectory caches, and launched a persistent MPS rae_temporal MSE-only warmup. Startup succeeded with temporal_matrix_shape [498, 499, 6144]; epoch 1 completed at loss 0.89692 and epoch 2 is decreasing with stable memory.
+
+### Did Not Work / Caveats
+
+- The active warmup has no teacher-forced replay KL gradients yet: replay_loss_weight=0, replay_loss_steps=0, and replay_gradients=false. This is intentional as a clean reconstruction baseline, but it does not yet include the behavior-aligned frozen-LLM token-level signal.
+
+### Left To Do
+
+- Let the MSE-only run reach an early checkpoint such as epoch 10, run reconstruction/PCA diagnostics, then resume from that checkpoint with conservative teacher-forced generated-token replay KL if reconstruction is stable.

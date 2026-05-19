@@ -26,9 +26,10 @@ from the reconstructed cache, and the task verifier decides whether that replay
 or generated continuation solved the problem.
 
 During training, the local LLM may also be used as a frozen differentiable
-critic. Gradients flow through reconstructed KV tensors into the RAE, but the
-LLM weights stay frozen. This LLM loss is optional and auxiliary; the codec
-still learns sequence-to-point-to-sequence reconstruction.
+critic through teacher-forced generated-token replay KL. Gradients flow through
+reconstructed KV tensors into the RAE, but the LLM weights stay frozen. This is
+optional and auxiliary; the codec still learns sequence-to-point-to-sequence
+cache reconstruction. It is not a final-answer correctness loss.
 
 ## Full Flow
 
@@ -178,12 +179,12 @@ still learns sequence-to-point-to-sequence reconstruction.
                     +---------------------+
                                |
                                v
-        compare original and reconstructed prompt-state transitions
+        compare original and reconstructed generated-token transitions
 
-        for selected prompt positions t:
+        for selected generated reasoning positions t:
           original prefix cache state_1..state_t
           reconstructed prefix cache state'_1..state'_t
-          same next prompt token tok_{t+1}
+          same next original generated token tok_{t+1}
                                |
                                v
                     +---------------------+
@@ -212,9 +213,10 @@ still learns sequence-to-point-to-sequence reconstruction.
                                v
         gradients flow through decoded KV cache into the RAE only
 
-        Important: this is not answer-string decoding and not continuation
-        prediction as the main task. It is a differentiable state-quality loss
-        on the reconstructed temporal cache sequence.
+        Important: this is not final-answer supervision and not a verifier
+        reward. It is a differentiable state-quality loss on the reconstructed
+        temporal cache sequence: does the decoded cache induce the same local
+        next-token distribution as the original solved trajectory?
                                |
                                v
 ================================================================================
@@ -272,7 +274,7 @@ Problem
   -> latent plan point z
   -> LSTM decoder over token time
   -> reconstructed temporal KV-cache sequence
-  -> optional frozen-LLM prompt-transition KL gradients during training
+  -> optional frozen-LLM generated-token replay KL gradients during training
   -> LLM continuation from reconstructed cache
   -> output text
   -> verifier outcome
@@ -313,6 +315,12 @@ The decoded cache is still not literally text by itself; KV caches are not
 invertible transcripts. But this path trains the bottleneck on the full
 trajectory rather than only the prompt prefix, so reconstructions and
 interpolations should preserve much more of the reasoning plan structure.
+
+For interpolation experiments, a solved-only training subset is often the
+cleaner target. It learns a manifold of successful reasoning trajectories,
+reduces compute, and avoids spending capacity on source generations whose
+plans already failed. Mixed solved/failed runs can still be useful for
+diagnostics, but they are harder to interpret as a latent space of good plans.
 
 ## Prompt Decoder Path
 
@@ -387,7 +395,7 @@ blend, or corrupt reasoning structure.
 ## Training Objective
 
 The base objective is masked temporal reconstruction MSE over real prompt-token
-states:
+and generated-token KV states:
 
 ```text
 loss = MSE(original_temporal_cache, reconstructed_temporal_cache)
@@ -419,6 +427,21 @@ step budget, such as the original generation length or the collection cap. That
 is scientifically closer to "replay the whole reasoning process," but it is
 also much more expensive because each supervised token requires an additional
 frozen-LLM forward through the reconstructed cache.
+
+The current recommended curriculum is:
+
+```text
+1. Train an all-layer, full-trajectory, solved-only RAE with cache MSE only.
+2. Inspect reconstruction loss, checkpoint health, and decoded-cache replay
+   diagnostics at early checkpoints.
+3. Resume from a stable MSE checkpoint with a small teacher-forced replay KL
+   weight, e.g. --replay-loss-weight 0.01 and --replay-loss-steps 4.
+4. Increase replay_loss_steps only if memory and speed remain stable.
+```
+
+This keeps final task correctness out of the loss while adding gradients that
+are closer to the behavioural question: whether the reconstructed cache drives
+the frozen local LLM through the same reasoning-token transitions.
 
 ## Variable Source Lengths
 
