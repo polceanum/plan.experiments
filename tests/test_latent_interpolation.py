@@ -282,6 +282,11 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
     assert "Endpoint A original -> decoded/interpolated alpha rows -> Endpoint B original" in transition_report.read_text(
         encoding="utf-8"
     )
+    latent_line_report = run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_latent_line.md"
+    assert latent_line_report.exists()
+    latent_line_text = latent_line_report.read_text(encoding="utf-8")
+    assert "Endpoint A solved plan -> interpolated latent points -> Endpoint B solved plan" in latent_line_text
+    assert "Middle points are judged as self-contained candidate plans" in latent_line_text
     report = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_inspection.md").read_text(encoding="utf-8")
     assert "Endpoint A solved plan" in report
     assert "Decoded A reconstruction" in report

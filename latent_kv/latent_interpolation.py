@@ -889,6 +889,80 @@ def _render_plan_transition_tables(pair_rows: list[dict[str, Any]], replay_rows:
     return "\n".join(chunks)
 
 
+def _quality_labels(row: dict[str, Any]) -> str:
+    quality = row.get("candidate_plan_quality") or {}
+    labels = []
+    if quality.get("potentially_solved"):
+        labels.append("potentially solved")
+    if quality.get("inspectable"):
+        labels.append("inspectable")
+    if quality.get("appears_truncated"):
+        labels.append("truncated")
+    if quality.get("has_placeholder_drift"):
+        labels.append("placeholder drift")
+    replay_generation = row.get("replay_generation") or {}
+    if replay_generation.get("hit_max_tokens"):
+        labels.append("hit token cap")
+    if not labels:
+        labels.append("weak")
+    return f"{', '.join(labels)}; score `{quality.get('score')}`"
+
+
+def _render_latent_line_report(pair_rows: list[dict[str, Any]], replay_rows: list[dict[str, Any]]) -> str:
+    rows_by_pair_alpha: dict[tuple[str, float], list[dict[str, Any]]] = defaultdict(list)
+    for row in replay_rows:
+        rows_by_pair_alpha[(str(row["pair_id"]), float(row["alpha"]))].append(row)
+
+    chunks = [
+        "# Latent Line Plan Inspection",
+        "",
+        "This is the concept-first interpolation view:",
+        "",
+        "Endpoint A solved plan -> interpolated latent points -> Endpoint B solved plan.",
+        "",
+        "Each alpha is a latent point. Because the current replay implementation needs an endpoint cache shape and prompt/logit context, an alpha may have more than one decoded candidate. Treat disagreement between those candidates as instability of that latent point, not as separate tasks.",
+        "",
+        "Middle points are judged as self-contained candidate plans. They are not expected to solve either endpoint task.",
+        "",
+    ]
+
+    for pair in pair_rows:
+        pair_id = str(pair["pair_id"])
+        alphas = sorted(alpha for (current_pair_id, alpha) in rows_by_pair_alpha if current_pair_id == pair_id)
+        chunks.extend(
+            [
+                f"## {pair_id}: {pair['a']['task_id']} -> {pair['b']['task_id']}",
+                "",
+                f"**Endpoint A task** ({pair['a']['primary_category']}, target `{pair['a']['target']}`): {_excerpt(_problem_text(pair['a']['prompt']), 420)}",
+                "",
+                f"**Endpoint B task** ({pair['b']['primary_category']}, target `{pair['b']['target']}`): {_excerpt(_problem_text(pair['b']['prompt']), 420)}",
+                "",
+                "| order | alpha | latent point | decoded candidates | plan-quality read | text ref |",
+                "|---:|---:|---|---|---|---|",
+                f"| 0 | 0.000 | Endpoint A solved plan | original endpoint output | solves A target `{pair['a']['target']}`; parsed `{pair['a']['parsed_answer']}` | A original below |",
+            ]
+        )
+        text_blocks: list[tuple[str, str]] = [("A original", str(pair["a"].get("output_text") or ""))]
+        for order, alpha in enumerate(alphas, start=1):
+            alpha_rows = sorted(rows_by_pair_alpha[(pair_id, alpha)], key=lambda row: str(row.get("replay_context")))
+            contexts = ", ".join(f"{row.get('replay_context')}: parsed `{row.get('decoded_parsed_answer')}`" for row in alpha_rows)
+            qualities = "; ".join(f"{row.get('replay_context')}: {_quality_labels(row)}" for row in alpha_rows)
+            chunks.append(
+                f"| {order} | {alpha:.3f} | interpolated latent point | {contexts} | {qualities} | alpha {alpha:.3f} candidate text below |"
+            )
+            for row in alpha_rows:
+                label = f"alpha {alpha:.3f} candidate ({row.get('replay_context')}-context decode)"
+                text_blocks.append((label, str(row.get("decoded_output") or "")))
+        chunks.append(
+            f"| {len(alphas) + 1} | 1.000 | Endpoint B solved plan | original endpoint output | solves B target `{pair['b']['target']}`; parsed `{pair['b']['parsed_answer']}` | B original below |"
+        )
+        text_blocks.append(("B original", str(pair["b"].get("output_text") or "")))
+        chunks.extend(["", "Full plan text:", ""])
+        for label, text in text_blocks:
+            chunks.extend([f"### {label}", "", _markdown_code_block(text), ""])
+    return "\n".join(chunks)
+
+
 def _accuracy_by_context_alpha(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[bool]] = defaultdict(list)
     for row in rows:
@@ -1254,6 +1328,7 @@ def run_latent_interpolation(
     solved_inspection_path = output_dir / "interpolation_inspection_solved_reconstructions.md"
     candidate_plan_path = output_dir / "interpolation_candidate_plans.md"
     transition_tables_path = output_dir / "interpolation_plan_transition_tables.md"
+    latent_line_path = output_dir / "interpolation_latent_line.md"
     _jsonl_write(pairs_path, pair_rows)
     _jsonl_write(replays_path, replay_rows)
     sequence_path.write_text(_render_sequences(pair_rows, replay_rows), encoding="utf-8")
@@ -1264,6 +1339,7 @@ def run_latent_interpolation(
     )
     candidate_plan_path.write_text(_render_candidate_plan_report(pair_rows, replay_rows), encoding="utf-8")
     transition_tables_path.write_text(_render_plan_transition_tables(pair_rows, replay_rows), encoding="utf-8")
+    latent_line_path.write_text(_render_latent_line_report(pair_rows, replay_rows), encoding="utf-8")
     plot_path = _plot_interpolation_accuracy(replay_rows, output_dir)
 
     artifacts = {
@@ -1274,6 +1350,7 @@ def run_latent_interpolation(
         "interpolation_inspection_solved_reconstructions.md": str(solved_inspection_path),
         "interpolation_candidate_plans.md": str(candidate_plan_path),
         "interpolation_plan_transition_tables.md": str(transition_tables_path),
+        "interpolation_latent_line.md": str(latent_line_path),
     }
     if plot_path is not None:
         artifacts["interpolation_accuracy_by_alpha.png"] = plot_path
