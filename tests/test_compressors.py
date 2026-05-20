@@ -76,6 +76,50 @@ def _write_run(tmp_path: Path) -> None:
         )
 
 
+def _write_trajectory_run(tmp_path: Path) -> None:
+    for idx in range(2):
+        cache_path = tmp_path / "caches" / f"{idx}.pt"
+        metadata = CacheMetadata(
+            model_id="fake",
+            tokenizer_id="fake",
+            dtype="torch.float32",
+            device="cpu",
+            layers=1,
+            selected_layers=[0],
+            selected_heads=None,
+            token_count=4,
+            cache_path=str(cache_path),
+        )
+        save_cache_bundle(
+            cache_path,
+            _cache(idx),
+            metadata,
+            input_ids=torch.tensor([[1, 2, 5, 6]]),
+            attention_mask=torch.tensor([[1, 1, 1, 1]]),
+            last_logits=torch.randn(1, 10),
+            generation_token_ids=torch.tensor([[5, 6]]),
+            generation_config={"cache_mode": "trajectory", "prompt_tokens": 2},
+        )
+        append_jsonl(
+            tmp_path / "records.jsonl",
+            TrajectoryRecord(
+                run_id=tmp_path.name,
+                benchmark="hanoi",
+                task_id=f"task_{idx}",
+                model_id="fake",
+                seed=0,
+                attempt_id=0,
+                prompt="p",
+                target="t",
+                output_text="o",
+                parsed_answer="o",
+                correct=True,
+                retry_index=0,
+                cache_path=str(cache_path),
+            ),
+        )
+
+
 def _write_variable_length_run(tmp_path: Path) -> None:
     for idx, tokens in enumerate([4, 3]):
         cache_path = tmp_path / "caches" / f"{idx}.pt"
@@ -367,6 +411,35 @@ def test_temporal_rae_can_use_teacher_forced_generation_replay_gradients(tmp_pat
     assert epoch_rows[0]["replay_gradients"] is True
     assert "teacher_forced_generation_replay_kl" in epoch_rows[0]["loss_components"]
     assert "frozen_llm_prompt_transition_kl" not in epoch_rows[0]["loss_components"]
+
+
+def test_temporal_rae_replay_gradients_preserve_trajectory_prompt_boundary(tmp_path: Path, monkeypatch):
+    _write_trajectory_run(tmp_path)
+    monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
+    initial_cache_tokens = []
+
+    def fake_teacher_forced_generation_logits(bundle, cache, token_ids, model, device):
+        del token_ids, model, device
+        initial_cache_tokens.append(compressors._teacher_forced_initial_cache_tokens(bundle, cache))
+        cache_score = sum((key.float().mean() + value.float().mean()) for key, value in cache)
+        return [torch.stack([cache_score, -cache_score, cache_score * 0.5], dim=0).reshape(1, 1, 3)]
+
+    monkeypatch.setattr(compressors, "_teacher_forced_generation_logits", fake_teacher_forced_generation_logits)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        replay_loss_weight=0.01,
+        replay_loss_steps=1,
+        log_every=1,
+    )
+
+    assert initial_cache_tokens
+    assert set(initial_cache_tokens) == {2}
 
 
 def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):

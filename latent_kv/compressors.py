@@ -679,6 +679,7 @@ def train_temporal_lstm_autoencoder(
                     {
                         "input_ids": bundle.get("input_ids"),
                         "attention_mask": bundle.get("attention_mask"),
+                        "generation_config": bundle.get("generation_config") or {},
                     }
                 )
                 del original_cache, token_ids

@@ -824,3 +824,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use prompt-boundary reconstruction scans for future full-trajectory checkpoints. Recheck at epoch 20/30 and consider stronger replay loss or more replay steps only if task-specificity remains absent after MSE improves.
+
+## 2026-05-20 - Fix training replay bundle trajectory metadata
+
+### Worked
+
+- Found a second replay-boundary bug in temporal RAE training: target replay logits used the full trajectory bundle metadata, but predicted replay logits used stripped bundles without generation_config, so reconstructed caches were replayed from the full trajectory length. Preserved generation_config for training replay bundles and added a regression test that all replay-gradient calls use the trajectory prompt boundary.
+
+### Did Not Work / Caveats
+
+- The active corrected run up to epoch 15 was still trained with this target/predicted replay-boundary mismatch and should not be treated as a valid replay-KL experiment.
+
+### Left To Do
+
+- Restart the full-trajectory replay-KL run from scratch using the fixed training metadata path, then rerun prompt-boundary reconstruction analysis at epoch 10/20.
