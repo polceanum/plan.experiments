@@ -211,6 +211,14 @@ def render_training_status(
     completed = [row for row in rows if row.get("loss") is not None]
     last_completed = completed[-1] if completed else None
     current_loss = _row_loss(last)
+    replay_active = bool(last.get("replay_gradients", False))
+    components = last.get("partial_loss_components") or last.get("loss_components") or {}
+    if components.get("teacher_forced_generation_replay_kl") not in {None, 0, 0.0}:
+        replay_active = True
+    if not replay_active and last_completed is not None:
+        completed_components = last_completed.get("loss_components") or {}
+        if completed_components.get("teacher_forced_generation_replay_kl") not in {None, 0, 0.0}:
+            replay_active = True
     status_path = status_path or (run_dir / f"{method}_status.md")
 
     recent_completed = completed[-8:]
@@ -224,7 +232,7 @@ def render_training_status(
         f"- Batch: `{last.get('batch', '-')}/{last.get('batches', '-')}`",
         f"- Current loss: `{_format_float(current_loss)}`",
         f"- Memory GB: `{_format_float(last.get('memory_gb'))}`",
-        f"- Replay gradients: `{bool(last.get('replay_gradients', False))}`",
+        f"- Replay gradients: `{replay_active}`",
         "",
     ]
     if last_completed is not None:
@@ -263,7 +271,7 @@ def render_training_status(
         last_completed_epoch=int(last_completed["epoch"]) if last_completed and last_completed.get("epoch") is not None else None,
         last_completed_loss=float(last_completed["loss"]) if last_completed and last_completed.get("loss") is not None else None,
         memory_gb=float(last["memory_gb"]) if last.get("memory_gb") is not None else None,
-        replay_gradients=bool(last.get("replay_gradients", False)),
+        replay_gradients=replay_active,
         training_log_path=str(log_path),
         status_path=str(status_path),
         readable_log_path=str(readable_log_path) if readable_log_path is not None else None,

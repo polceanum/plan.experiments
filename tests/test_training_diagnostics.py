@@ -93,3 +93,29 @@ def test_training_status_renders_human_readable_files(tmp_path):
     readable = (tmp_path / "readable.log").read_text(encoding="utf-8")
     assert "startup device=mps" in readable
     assert "epoch 1/10 batch 2/4 partial_loss=0.9" in readable
+
+
+def test_training_status_marks_replay_active_from_heartbeat_components(tmp_path):
+    path = tmp_path / "compressions" / "rae_temporal_training.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [
+        {
+            "event": "batch_heartbeat",
+            "epoch": 2,
+            "epochs": 10,
+            "batch": 3,
+            "batches": 4,
+            "partial_loss": 0.5,
+            "partial_loss_components": {
+                "masked_temporal_reconstruction_mse": 0.49,
+                "teacher_forced_generation_replay_kl": 0.2,
+            },
+            "memory_gb": 1.0,
+        },
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    summary = render_training_status(tmp_path, "rae_temporal", status_path=tmp_path / "status.md")
+
+    assert "Replay gradients: `True`" in (tmp_path / "status.md").read_text(encoding="utf-8")
+    assert summary.replay_gradients is True
