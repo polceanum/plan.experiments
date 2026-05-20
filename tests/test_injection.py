@@ -90,3 +90,44 @@ def test_greedy_continue_applies_generation_repetition_penalty():
     )
 
     assert output == "3"
+
+
+def test_greedy_continue_replays_trajectory_cache_from_prompt_boundary():
+    class TrajectoryReplayModel(PositionalReplayModel):
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            vocab = torch.zeros(1, 1, 16)
+            vocab[:, :, 6 if len(self.calls) == 1 else 7] = 1.0
+            key, value = kwargs["past_key_values"][0]
+            next_past = ((torch.cat([key, key[..., -1:, :]], dim=-2), torch.cat([value, value[..., -1:, :]], dim=-2)),)
+            return type("Out", (), {"past_key_values": next_past, "logits": vocab})()
+
+    model = TrajectoryReplayModel()
+    full_cache = ((torch.zeros(1, 1, 5, 2), torch.zeros(1, 1, 5, 2)),)
+    bundle = {
+        "cache": full_cache,
+        "input_ids": torch.tensor([[10, 11, 12, 6, 7]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1, 1]]),
+        "last_logits": torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0]]),
+        "generation_config": {
+            "cache_mode": "trajectory",
+            "prompt_tokens": 3,
+            "prompt_input_ids": [[10, 11, 12]],
+        },
+    }
+
+    output = greedy_continue_from_loaded_bundle(
+        bundle=bundle,
+        model=model,
+        tokenizer=TinyTokenizer(),
+        device=torch.device("cpu"),
+        max_new_tokens=2,
+    )
+
+    assert output == "6 7"
+    assert model.calls[0]["past_key_values"][0][0].shape[-2] == 2
+    assert model.calls[0]["attention_mask"].shape[-1] == 3
+    assert model.calls[0]["position_ids"].tolist() == [[2]]
+    assert model.calls[1]["past_key_values"][0][0].shape[-2] == 3
+    assert model.calls[1]["attention_mask"].shape[-1] == 4
+    assert model.calls[1]["position_ids"].tolist() == [[3]]

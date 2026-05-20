@@ -38,6 +38,72 @@ def _apply_repetition_penalty(logits: torch.Tensor, token_ids: torch.Tensor, pen
     return adjusted
 
 
+def _model_cache_dtype(model: Any) -> torch.dtype | None:
+    config = getattr(model, "config", None)
+    torch_dtype = getattr(config, "torch_dtype", None)
+    if isinstance(torch_dtype, torch.dtype):
+        return torch_dtype
+    dtype = getattr(model, "dtype", None)
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    try:
+        parameter = next(model.parameters())
+    except (AttributeError, StopIteration, TypeError):
+        return None
+    return parameter.dtype
+
+
+def _slice_cache_tokens(cache: CacheTuple, token_count: int) -> CacheTuple:
+    token_count = max(0, int(token_count))
+    return tuple((key[..., :token_count, :], value[..., :token_count, :]) for key, value in cache)
+
+
+def _trajectory_prompt_input_ids(bundle: dict[str, Any]) -> torch.Tensor | None:
+    generation_config = bundle.get("generation_config") or {}
+    prompt_input_ids = generation_config.get("prompt_input_ids")
+    if prompt_input_ids is not None:
+        return torch.tensor(prompt_input_ids, dtype=torch.long)
+    prompt_tokens = generation_config.get("prompt_tokens")
+    input_ids = bundle.get("input_ids")
+    if prompt_tokens is not None and input_ids is not None:
+        return input_ids[..., : int(prompt_tokens)].long().cpu()
+    return None
+
+
+@torch.no_grad()
+def _prepare_trajectory_prompt_replay(
+    bundle: dict[str, Any],
+    cache: CacheTuple,
+    model: Any,
+    device: torch.device,
+) -> tuple[CacheTuple, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    prompt_input_ids = _trajectory_prompt_input_ids(bundle)
+    if prompt_input_ids is None or int(prompt_input_ids.shape[-1]) < 1:
+        raise ValueError("Trajectory bundle must contain prompt_input_ids or prompt_tokens for prompt-prefix replay")
+
+    prompt_input_ids = prompt_input_ids.to(device)
+    prompt_len = int(prompt_input_ids.shape[-1])
+    prefix_len = max(prompt_len - 1, 0)
+    prefix_cache = cache_to_device(_slice_cache_tokens(cache, prefix_len), device, dtype=_model_cache_dtype(model))
+    current_mask = torch.ones((1, prompt_len), dtype=torch.long, device=device)
+    last_prompt_token = prompt_input_ids[..., -1:]
+    model_kwargs = {
+        "input_ids": last_prompt_token,
+        "attention_mask": current_mask,
+        "past_key_values": prefix_cache,
+        "use_cache": True,
+        "return_dict": True,
+    }
+    replay_position = torch.tensor([[prefix_len]], dtype=torch.long, device=device)
+    forward_parameters = _forward_parameters(model)
+    if "position_ids" in forward_parameters:
+        model_kwargs["position_ids"] = replay_position
+    if "cache_position" in forward_parameters:
+        model_kwargs["cache_position"] = replay_position.reshape(-1)
+    outputs = model(**model_kwargs)
+    return outputs.past_key_values, current_mask, outputs.logits[:, -1, :], prompt_input_ids, prompt_len
+
+
 @torch.no_grad()
 def greedy_continue_from_loaded_bundle(
     bundle: dict[str, Any],
@@ -56,19 +122,29 @@ def greedy_continue_from_loaded_bundle(
     if input_ids is None or logits is None:
         raise ValueError("Bundle must contain input_ids and last_logits for cache replay")
 
-    past = cache_to_device(cache, device)
+    generation_config = bundle.get("generation_config") or {}
+    is_trajectory = generation_config.get("cache_mode") == "trajectory" and generation_config.get("prompt_tokens") is not None
+    if is_trajectory and last_logits_override is None:
+        past, current_mask, next_logits, token_history, prompt_len = _prepare_trajectory_prompt_replay(
+            bundle=bundle,
+            cache=cache,
+            model=model,
+            device=device,
+        )
+    else:
+        past = cache_to_device(cache, device, dtype=_model_cache_dtype(model))
+        prompt_len = int(input_ids.shape[-1])
+        current_mask = (
+            attention_mask.to(device)
+            if attention_mask is not None
+            else torch.ones((1, prompt_len), dtype=torch.long, device=device)
+        )
+        next_logits = logits.to(device)
+        token_history = input_ids.to(device)
     generated: list[int] = []
-    prompt_len = int(input_ids.shape[-1])
-    current_mask = (
-        attention_mask.to(device)
-        if attention_mask is not None
-        else torch.ones((1, prompt_len), dtype=torch.long, device=device)
-    )
-    next_logits = logits.to(device)
     forward_parameters = _forward_parameters(model)
     eos_ids = _eos_ids(tokenizer)
     repetition_penalty = float(getattr(getattr(model, "generation_config", None), "repetition_penalty", 1.0) or 1.0)
-    token_history = input_ids.to(device)
 
     stopped_on_eos = False
     for _ in range(max_new_tokens):

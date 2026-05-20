@@ -810,3 +810,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Restart the replay-KL scratch run from a clean directory with the corrected objective, then rerun epoch-20 latent/reconstruction analysis.
+
+## 2026-05-20 - Fix trajectory reconstruction scan replay boundary
+
+### Worked
+
+- Found that reconstruction scans for full-trajectory caches were replaying from the end of the completed prompt+solution cache. Updated cache injection to replay trajectory bundles from the prompt boundary by slicing the cache prefix and recomputing continuation logits from the decoded prompt prefix. Original trajectory caches now reproduce source reasoning under the fixed path.
+
+### Did Not Work / Caveats
+
+- Epoch-10 decoded reconstructions still do not solve tasks; after the replay fix they emit non-empty generic reasoning templates, which suggests the codec is not yet reconstructing task-specific trajectory state at this loss level.
+
+### Left To Do
+
+- Use prompt-boundary reconstruction scans for future full-trajectory checkpoints. Recheck at epoch 20/30 and consider stronger replay loss or more replay steps only if task-specificity remains absent after MSE improves.
