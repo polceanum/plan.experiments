@@ -774,7 +774,7 @@ def train_temporal_lstm_autoencoder(
                             training_device,
                         )
                         for predicted, target in zip(predicted_replay_logits, target_replay_logits[row_idx]):
-                            target_probs = torch.softmax(target.detach().to(training_device), dim=-1)
+                            target_probs = torch.softmax(target.detach().to(training_device).float(), dim=-1)
                             predicted_log_probs = torch.log_softmax(predicted.float(), dim=-1)
                             replay_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
                     if replay_losses:

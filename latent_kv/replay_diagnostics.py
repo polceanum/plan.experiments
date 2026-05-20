@@ -23,6 +23,7 @@ class ReplayFidelitySummary:
     mean_logit_mse: float | None
     mean_kl_original_to_reconstructed: float | None
     top1_match_rate: float | None
+    source_first_token_match_rate: float | None
     source_second_token_match_rate: float | None
     per_step_top1_match_rate: list[float | None]
     per_step_mean_logit_cosine: list[float | None]
@@ -225,14 +226,19 @@ def score_replay_fidelity(
             step_rows.append({"step": step_idx, **_logit_comparison(original_logits, reconstructed_logits)})
         comparison = dict(step_rows[0])
         comparison.pop("step", None)
-        source_second_token = None
-        if generation_token_ids is not None and int(generation_token_ids.numel()) >= 2:
-            source_second_token = int(generation_token_ids.reshape(-1)[1].item())
+        if int(replay_tokens.numel()) >= 1:
+            source_first_token = int(replay_tokens.reshape(-1)[0].item())
+            comparison["source_first_token"] = source_first_token
+            comparison["source_first_token_original_rank"] = _token_rank(original_steps[0], source_first_token)
+            comparison["source_first_token_reconstructed_rank"] = _token_rank(reconstructed_steps[0], source_first_token)
+            comparison["source_first_token_match"] = bool(int(comparison["reconstructed_top1"]) == source_first_token)
+        if int(replay_tokens.numel()) >= 2 and len(original_steps) >= 2 and len(reconstructed_steps) >= 2:
+            source_second_token = int(replay_tokens.reshape(-1)[1].item())
             comparison["source_second_token"] = source_second_token
-            comparison["source_second_token_original_rank"] = _token_rank(original_steps[0], source_second_token)
-            comparison["source_second_token_reconstructed_rank"] = _token_rank(reconstructed_steps[0], source_second_token)
+            comparison["source_second_token_original_rank"] = _token_rank(original_steps[1], source_second_token)
+            comparison["source_second_token_reconstructed_rank"] = _token_rank(reconstructed_steps[1], source_second_token)
             comparison["source_second_token_match"] = bool(
-                int(comparison["reconstructed_top1"]) == source_second_token
+                int(torch.argmax(reconstructed_steps[1].detach().float()).item()) == source_second_token
             )
         rows.append(
             {
@@ -279,6 +285,7 @@ def score_replay_fidelity(
         mean_logit_mse=mean_float("logit_mse"),
         mean_kl_original_to_reconstructed=mean_float("kl_original_to_reconstructed"),
         top1_match_rate=mean_bool("top1_match"),
+        source_first_token_match_rate=mean_bool("source_first_token_match"),
         source_second_token_match_rate=mean_bool("source_second_token_match"),
         per_step_top1_match_rate=per_step_mean_bool("top1_match"),
         per_step_mean_logit_cosine=per_step_mean_float("logit_cosine"),
@@ -297,6 +304,7 @@ def score_replay_fidelity(
     extra[f"{prefix}_mean_logit_mse"] = summary.mean_logit_mse
     extra[f"{prefix}_mean_kl_original_to_reconstructed"] = summary.mean_kl_original_to_reconstructed
     extra[f"{prefix}_top1_match_rate"] = summary.top1_match_rate
+    extra[f"{prefix}_source_first_token_match_rate"] = summary.source_first_token_match_rate
     extra[f"{prefix}_source_second_token_match_rate"] = summary.source_second_token_match_rate
     extra[f"{prefix}_steps"] = summary.steps
     extra[f"{prefix}_per_step_top1_match_rate"] = summary.per_step_top1_match_rate

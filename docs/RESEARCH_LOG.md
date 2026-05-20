@@ -852,3 +852,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Restart full-trajectory replay-KL training once more with first-token replay included; analyze at epoch 10/20 using prompt-boundary reconstruction scans.
+
+## 2026-05-20 - Audit replay KL numerics and fidelity metrics
+
+### Worked
+
+- Ran another full-trajectory audit while firsttok training continued. Verified a real source-cache oracle ranks the first four stored generated tokens at rank 1 from the prompt boundary. Updated replay KL to compute teacher probabilities in float32 instead of model dtype, and fixed replay-fidelity diagnostics so first-token and second-token source ranks are measured against the correct replay steps after the first-token KL shift.
+
+### Did Not Work / Caveats
+
+- No additional boundary or cache-shape bug was found in training/reconstruction/interpolation paths during this pass. Existing private _next_logits_after_cache_token remains unused.
+
+### Left To Do
+
+- Let the firsttok run continue; analyze the first complete checkpoint with prompt-boundary reconstruction scans.
