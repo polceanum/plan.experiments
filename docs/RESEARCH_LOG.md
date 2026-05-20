@@ -838,3 +838,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Restart the full-trajectory replay-KL run from scratch using the fixed training metadata path, then rerun prompt-boundary reconstruction analysis at epoch 10/20.
+
+## 2026-05-20 - Include prompt-boundary first-token replay KL
+
+### Worked
+
+- Found that teacher-forced replay KL compared logits only after consuming generated tokens, so it missed the prompt-boundary distribution that selects the first reasoning token. Updated training and replay diagnostics to produce one KL target per generated token starting at the prompt boundary, with regression tests for trajectory prefix positions.
+
+### Did Not Work / Caveats
+
+- The fixedmeta run had correct trajectory metadata but still lacked first-token replay KL, so it should be restarted before treating results as valid.
+
+### Left To Do
+
+- Restart full-trajectory replay-KL training once more with first-token replay included; analyze at epoch 10/20 using prompt-boundary reconstruction scans.

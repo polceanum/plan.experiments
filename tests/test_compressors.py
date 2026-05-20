@@ -265,7 +265,7 @@ def test_teacher_forced_replay_slices_full_trajectory_cache_to_prompt_prefix():
         torch.device("cpu"),
     )
 
-    assert model.seen == [(3, 4, 3), (4, 5, 4)]
+    assert model.seen == [(2, 3, 2), (3, 4, 3)]
 
 
 def test_random_projection_compression_writes_artifacts(tmp_path: Path):

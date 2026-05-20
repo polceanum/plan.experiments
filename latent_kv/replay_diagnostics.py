@@ -123,33 +123,46 @@ def _teacher_forced_replay_logits(
         raise ValueError("Bundle must contain input_ids for replay-fidelity diagnostics")
     cache_dtype = _model_cache_dtype(model)
     initial_cache_tokens = _teacher_forced_initial_cache_tokens(bundle, cache)
+    if initial_cache_tokens < 1:
+        raise ValueError("Teacher-forced replay diagnostics require at least one prefix token")
+    prefix_tokens = input_ids[..., :initial_cache_tokens].to(device)
     current_mask = (
         attention_mask[..., :initial_cache_tokens].to(device)
         if attention_mask is not None
         else torch.ones((1, initial_cache_tokens), dtype=torch.long, device=device)
     )
-    past = cache_to_device(_slice_cache_tokens(cache, initial_cache_tokens), device, dtype=cache_dtype)
+    past = cache_to_device(_slice_cache_tokens(cache, initial_cache_tokens - 1), device, dtype=cache_dtype)
     forward_parameters = _forward_parameters(model)
     logits_by_step: list[torch.Tensor] = []
-    for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
-        current_mask = torch.cat(
-            [current_mask, torch.ones((1, 1), dtype=current_mask.dtype, device=device)],
-            dim=-1,
-        )
-        next_token = torch.tensor([[int(token_id)]], dtype=torch.long, device=device)
+
+    def forward_one(token: torch.Tensor, position: int) -> Any:
         model_kwargs = {
-            "input_ids": next_token,
+            "input_ids": token,
             "attention_mask": current_mask,
             "past_key_values": past,
             "use_cache": True,
             "return_dict": True,
         }
-        replay_position = torch.tensor([[initial_cache_tokens + step_idx]], dtype=torch.long, device=device)
+        replay_position = torch.tensor([[position]], dtype=torch.long, device=device)
         if "position_ids" in forward_parameters:
             model_kwargs["position_ids"] = replay_position
         if "cache_position" in forward_parameters:
             model_kwargs["cache_position"] = replay_position.reshape(-1)
-        outputs = model(**model_kwargs)
+        return model(**model_kwargs)
+
+    outputs = forward_one(prefix_tokens[..., -1:], initial_cache_tokens - 1)
+    past = outputs.past_key_values
+    logits_by_step.append(outputs.logits[:, -1, :].detach().cpu())
+
+    for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
+        if len(logits_by_step) >= int(token_ids.numel()):
+            break
+        current_mask = torch.cat(
+            [current_mask, torch.ones((1, 1), dtype=current_mask.dtype, device=device)],
+            dim=-1,
+        )
+        next_token = torch.tensor([[int(token_id)]], dtype=torch.long, device=device)
+        outputs = forward_one(next_token, initial_cache_tokens + step_idx)
         past = outputs.past_key_values
         logits_by_step.append(outputs.logits[:, -1, :].detach().cpu())
     return logits_by_step
