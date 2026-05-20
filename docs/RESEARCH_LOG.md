@@ -780,3 +780,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Monitor the scratch replay-KL run through its readable status/log files until replay target loading completes and epoch-1 heartbeats appear; compare early replay KL/MSE trends against the removed warm-start notes only as informal context.
+
+## 2026-05-20 - Epoch 20 scratch replay-KL trajectory RAE analysis
+
+### Worked
+
+- Generated epoch-20 latent/PCA artifacts for the scratch replay-KL solved498 full-trajectory run. All 498 solved trajectory records encoded successfully; PCA PC1/PC2 explained variance ratios were 0.6832 and 0.1946.
+- Ran a CPU reconstruction probe on 50 decoded endpoints with 256-token budget; cache validation had 0 replay runtime failures.
+- Exported the epoch-20 latent-to-prompt-decoder dataset with 498 rows.
+
+### Did Not Work / Caveats
+
+- Epoch-20 decoded reconstructions are still not semantically usable: 0/50 solved, 0/50 convincing, 46/50 empty outputs, and the non-empty outputs were short or task-drifted fragments.
+
+### Left To Do
+
+- Do not generate interpretive interpolation artifacts from epoch 20. Let the scratch replay-KL run continue to later checkpoints; retry reconstruction scans at epoch 50 or consider increasing replay steps/weight only after checking whether MSE continues improving without OOM.
