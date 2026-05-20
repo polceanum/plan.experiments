@@ -387,6 +387,13 @@ def _append_training_event(path: Path | None, event: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _atomic_torch_save(payload: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
+
+
 def _current_memory_gb() -> float:
     try:
         import psutil
@@ -741,7 +748,7 @@ def train_temporal_lstm_autoencoder(
             reconstruction_numerator = 0.0
             denominator_total = 0.0
             replay_loss_total = 0.0
-            replay_loss_batches = 0
+            replay_loss_observations = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
             for batch_index, batch_start in enumerate(range(0, int(normalized.shape[0]), batch_size), start=1):
                 batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
@@ -779,6 +786,7 @@ def train_temporal_lstm_autoencoder(
                             replay_losses.append(torch.nn.functional.kl_div(predicted_log_probs, target_probs, reduction="batchmean"))
                     if replay_losses:
                         replay_loss = torch.stack(replay_losses).mean()
+                        replay_loss_observations += 1
                     del reconstructed_sequence, replay_losses
                 loss = reconstruction_loss + (replay_loss_weight * replay_loss)
                 loss.backward()
@@ -788,7 +796,6 @@ def train_temporal_lstm_autoencoder(
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
                 replay_loss_total += float(replay_loss.detach().item())
-                replay_loss_batches += 1
                 if (
                     heartbeat_every_batches > 0
                     and (
@@ -798,7 +805,8 @@ def train_temporal_lstm_autoencoder(
                     )
                 ):
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-                    partial_replay_loss = replay_loss_total / max(replay_loss_batches, 1)
+                    partial_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
+                    partial_effective_replay_loss = replay_loss_total / max(batch_index, 1)
                     heartbeat = {
                         "event": "batch_heartbeat",
                         "elapsed_s": time.perf_counter() - start,
@@ -810,12 +818,14 @@ def train_temporal_lstm_autoencoder(
                         "batch_start": batch_start,
                         "batch_stop": batch_stop,
                         "training_method": "rae_temporal",
-                        "partial_loss": partial_reconstruction_loss + (replay_loss_weight * partial_replay_loss),
+                        "partial_loss": partial_reconstruction_loss + (replay_loss_weight * partial_effective_replay_loss),
                         "partial_loss_components": {
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
-                            "teacher_forced_generation_replay_kl": partial_replay_loss,
+                            "teacher_forced_generation_replay_kl": partial_sampled_replay_loss,
+                            "teacher_forced_generation_replay_kl_effective": partial_effective_replay_loss,
                         },
                         "replay_loss_every_n_batches": replay_loss_every_n_batches,
+                        "replay_loss_observations": replay_loss_observations,
                         "memory_gb": _current_memory_gb(),
                     }
                     _append_training_event(progress_path, heartbeat)
@@ -830,8 +840,9 @@ def train_temporal_lstm_autoencoder(
                     gc.collect()
                     _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-            mean_replay_loss = replay_loss_total / max(replay_loss_batches, 1)
-            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_replay_loss)
+            mean_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
+            mean_effective_replay_loss = replay_loss_total / max(total_batches, 1)
+            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_effective_replay_loss)
             mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
@@ -843,7 +854,8 @@ def train_temporal_lstm_autoencoder(
                 "loss": mean_loss,
                 "loss_components": {
                     "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
-                    "teacher_forced_generation_replay_kl": mean_replay_loss,
+                    "teacher_forced_generation_replay_kl": mean_sampled_replay_loss,
+                    "teacher_forced_generation_replay_kl_effective": mean_effective_replay_loss,
                 },
                 "method": "rae_temporal",
                 "masked_loss": True,
@@ -858,6 +870,7 @@ def train_temporal_lstm_autoencoder(
                 "replay_loss_steps": int(replay_loss_steps),
                 "replay_gradients": llm is not None and replay_loss_weight > 0,
                 "replay_loss_every_n_batches": replay_loss_every_n_batches,
+                "replay_loss_observations": replay_loss_observations,
                 "grad_clip_norm": float(grad_clip_norm),
                 "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                 "weight_decay": weight_decay,
@@ -899,8 +912,8 @@ def train_temporal_lstm_autoencoder(
                     "weight_decay": weight_decay,
                 }
                 checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
-                torch.save(checkpoint, checkpoint_path)
-                torch.save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
+                _atomic_torch_save(checkpoint, checkpoint_path)
+                _atomic_torch_save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
         except Exception as exc:
             _append_training_event(
                 progress_path,

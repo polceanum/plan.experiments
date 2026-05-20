@@ -866,3 +866,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Let the firsttok run continue; analyze the first complete checkpoint with prompt-boundary reconstruction scans.
+
+## 2026-05-20 - Audit checkpoint and replay KL logging reliability
+
+### Worked
+
+- While the firsttok full-trajectory replay-KL run continued, audited checkpoint writing and sparse replay-KL accounting. Added atomic checkpoint saves so analysis cannot catch half-written .pt files, and split replay-KL logging into sampled KL plus effective sparse-objective KL.
+
+### Did Not Work / Caveats
+
+- These reliability fixes do not affect the already-running Python process; they are for future starts/checkpoints after restart. No new cache-boundary or replay-target bug was found.
+
+### Left To Do
+
+- Let the firsttok run reach a complete checkpoint, then analyze with prompt-boundary reconstruction scans; use the sampled/effective KL distinction when interpreting future logs.

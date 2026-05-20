@@ -413,6 +413,34 @@ def test_temporal_rae_can_use_teacher_forced_generation_replay_gradients(tmp_pat
     assert "frozen_llm_prompt_transition_kl" not in epoch_rows[0]["loss_components"]
 
 
+def test_temporal_rae_reports_sampled_replay_kl_observations(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+    monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        replay_loss_weight=0.01,
+        replay_loss_steps=1,
+        replay_loss_every_n_batches=2,
+        train_batch_size=1,
+        log_every=1,
+    )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
+
+    assert epoch_rows[0]["replay_loss_every_n_batches"] == 2
+    assert epoch_rows[0]["replay_loss_observations"] == 1
+    assert epoch_rows[0]["loss_components"]["teacher_forced_generation_replay_kl"] > 0
+    assert epoch_rows[0]["loss_components"]["teacher_forced_generation_replay_kl_effective"] * 2 == pytest.approx(
+        epoch_rows[0]["loss_components"]["teacher_forced_generation_replay_kl"]
+    )
+
+
 def test_temporal_rae_replay_gradients_preserve_trajectory_prompt_boundary(tmp_path: Path, monkeypatch):
     _write_trajectory_run(tmp_path)
     monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
@@ -468,6 +496,7 @@ def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
     assert latest["token_dim"] == 4
     assert "state_dict" in latest
     assert "normalization_mean" in latest
+    assert not list(checkpoint_dir.glob("*.tmp"))
 
 
 def test_temporal_rae_can_resume_from_checkpoint(tmp_path: Path):
