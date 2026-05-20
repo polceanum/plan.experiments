@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from .cache import cache_to_device, choose_device, load_cache_bundle, load_model_and_tokenizer, unflatten_cache
+from .compressors import _model_cache_dtype, _slice_cache_tokens, _teacher_forced_initial_cache_tokens
 from .injection import _apply_repetition_penalty, _forward_parameters
 from .schemas import read_json, read_jsonl, write_json
 
@@ -79,11 +80,12 @@ def _next_logits_after_cache_token(
     attention_mask = bundle.get("attention_mask")
     if input_ids is None:
         raise ValueError("Bundle must contain input_ids for replay-fidelity diagnostics")
-    prompt_len = int(input_ids.shape[-1])
+    cache_dtype = _model_cache_dtype(model)
+    initial_cache_tokens = _teacher_forced_initial_cache_tokens(bundle, cache)
     current_mask = (
-        attention_mask.to(device)
+        attention_mask[..., :initial_cache_tokens].to(device)
         if attention_mask is not None
-        else torch.ones((1, prompt_len), dtype=torch.long, device=device)
+        else torch.ones((1, initial_cache_tokens), dtype=torch.long, device=device)
     )
     current_mask = torch.cat(
         [current_mask, torch.ones((1, 1), dtype=current_mask.dtype, device=device)],
@@ -93,11 +95,11 @@ def _next_logits_after_cache_token(
     model_kwargs = {
         "input_ids": next_token,
         "attention_mask": current_mask,
-        "past_key_values": cache_to_device(cache, device),
+        "past_key_values": cache_to_device(_slice_cache_tokens(cache, initial_cache_tokens), device, dtype=cache_dtype),
         "use_cache": True,
         "return_dict": True,
     }
-    replay_position = torch.tensor([[prompt_len]], dtype=torch.long, device=device)
+    replay_position = torch.tensor([[initial_cache_tokens]], dtype=torch.long, device=device)
     forward_parameters = _forward_parameters(model)
     if "position_ids" in forward_parameters:
         model_kwargs["position_ids"] = replay_position
@@ -119,13 +121,14 @@ def _teacher_forced_replay_logits(
     attention_mask = bundle.get("attention_mask")
     if input_ids is None:
         raise ValueError("Bundle must contain input_ids for replay-fidelity diagnostics")
-    prompt_len = int(input_ids.shape[-1])
+    cache_dtype = _model_cache_dtype(model)
+    initial_cache_tokens = _teacher_forced_initial_cache_tokens(bundle, cache)
     current_mask = (
-        attention_mask.to(device)
+        attention_mask[..., :initial_cache_tokens].to(device)
         if attention_mask is not None
-        else torch.ones((1, prompt_len), dtype=torch.long, device=device)
+        else torch.ones((1, initial_cache_tokens), dtype=torch.long, device=device)
     )
-    past = cache_to_device(cache, device)
+    past = cache_to_device(_slice_cache_tokens(cache, initial_cache_tokens), device, dtype=cache_dtype)
     forward_parameters = _forward_parameters(model)
     logits_by_step: list[torch.Tensor] = []
     for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
@@ -141,7 +144,7 @@ def _teacher_forced_replay_logits(
             "use_cache": True,
             "return_dict": True,
         }
-        replay_position = torch.tensor([[prompt_len + step_idx]], dtype=torch.long, device=device)
+        replay_position = torch.tensor([[initial_cache_tokens + step_idx]], dtype=torch.long, device=device)
         if "position_ids" in forward_parameters:
             model_kwargs["position_ids"] = replay_position
         if "cache_position" in forward_parameters:

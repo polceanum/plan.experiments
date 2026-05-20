@@ -796,3 +796,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Do not generate interpretive interpolation artifacts from epoch 20. Let the scratch replay-KL run continue to later checkpoints; retry reconstruction scans at epoch 50 or consider increasing replay steps/weight only after checking whether MSE continues improving without OOM.
+
+## 2026-05-20 - Fix full-trajectory replay KL prefix slicing
+
+### Worked
+
+- Found that replay KL for full-trajectory caches was teacher-forcing after the completed prompt+solution cache. Updated training and replay diagnostics to slice trajectory caches back to the prompt prefix before replaying generated reasoning tokens.
+
+### Did Not Work / Caveats
+
+- Epoch-20 reconstruction scans that continued after complete trajectories were misleading: original full-trajectory caches often immediately emit EOS as well, so empty continuations were not by themselves evidence of decoder collapse.
+
+### Left To Do
+
+- Restart the replay-KL scratch run from a clean directory with the corrected objective, then rerun epoch-20 latent/reconstruction analysis.

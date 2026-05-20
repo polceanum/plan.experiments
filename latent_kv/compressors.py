@@ -237,6 +237,29 @@ def _model_cache_dtype(model: Any) -> torch.dtype | None:
     return None
 
 
+def _cache_token_count(cache: Any) -> int:
+    if not cache:
+        return 0
+    return int(cache[0][0].shape[-2])
+
+
+def _slice_cache_tokens(cache: Any, token_count: int) -> Any:
+    token_count = max(0, int(token_count))
+    return tuple((key[..., :token_count, :], value[..., :token_count, :]) for key, value in cache)
+
+
+def _teacher_forced_initial_cache_tokens(bundle: dict[str, Any], cache: Any) -> int:
+    input_ids = bundle.get("input_ids")
+    if input_ids is None:
+        raise ValueError("Bundle must contain input_ids for teacher-forced replay loss")
+    input_len = int(input_ids.shape[-1])
+    cache_len = _cache_token_count(cache)
+    generation_config = bundle.get("generation_config") or {}
+    if generation_config.get("cache_mode") == "trajectory" and generation_config.get("prompt_tokens") is not None:
+        return min(int(generation_config["prompt_tokens"]), cache_len)
+    return min(input_len, cache_len)
+
+
 def _teacher_forced_generation_logits(
     bundle: dict[str, Any],
     cache: Any,
@@ -252,13 +275,13 @@ def _teacher_forced_generation_logits(
         return []
     input_ids = input_ids.to(device)
     cache_dtype = _model_cache_dtype(model)
-    prompt_len = int(input_ids.shape[-1])
+    initial_cache_tokens = _teacher_forced_initial_cache_tokens(bundle, cache)
     current_mask = (
-        attention_mask.to(device)
+        attention_mask[..., :initial_cache_tokens].to(device)
         if attention_mask is not None
-        else torch.ones((1, prompt_len), dtype=torch.long, device=device)
+        else torch.ones((1, initial_cache_tokens), dtype=torch.long, device=device)
     )
-    past = cache_to_device(cache, device, dtype=cache_dtype)
+    past = cache_to_device(_slice_cache_tokens(cache, initial_cache_tokens), device, dtype=cache_dtype)
     forward_parameters = _forward_parameters(model)
     logits_by_step: list[torch.Tensor] = []
     for step_idx, token_id in enumerate(token_ids.reshape(-1).tolist()):
@@ -274,7 +297,7 @@ def _teacher_forced_generation_logits(
             "use_cache": True,
             "return_dict": True,
         }
-        replay_position = torch.tensor([[prompt_len + step_idx]], dtype=torch.long, device=device)
+        replay_position = torch.tensor([[initial_cache_tokens + step_idx]], dtype=torch.long, device=device)
         if "position_ids" in forward_parameters:
             model_kwargs["position_ids"] = replay_position
         if "cache_position" in forward_parameters:

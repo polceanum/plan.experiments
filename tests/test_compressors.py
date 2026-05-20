@@ -169,6 +169,61 @@ def test_teacher_forced_replay_casts_cache_to_model_dtype():
     assert logits[0].dtype == torch.float16
 
 
+class _PrefixCheckingLM(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(()))
+        self.seen: list[tuple[int, int, int]] = []
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        past_key_values,
+        position_ids=None,
+        cache_position=None,
+        use_cache=True,
+        return_dict=True,
+    ):
+        del input_ids, use_cache, return_dict
+        self.seen.append(
+            (
+                int(past_key_values[0][0].shape[-2]),
+                int(attention_mask.shape[-1]),
+                int(position_ids.reshape(-1)[0].item()) if position_ids is not None else int(cache_position.reshape(-1)[0].item()),
+            )
+        )
+        next_past = tuple(
+            (
+                torch.cat([key, key[..., -1:, :]], dim=-2),
+                torch.cat([value, value[..., -1:, :]], dim=-2),
+            )
+            for key, value in past_key_values
+        )
+        logits = torch.ones((1, 1, 3), device=self.weight.device)
+        return SimpleNamespace(logits=logits, past_key_values=next_past)
+
+
+def test_teacher_forced_replay_slices_full_trajectory_cache_to_prompt_prefix():
+    model = _PrefixCheckingLM()
+    bundle = {
+        "input_ids": torch.arange(7, dtype=torch.long).reshape(1, 7),
+        "attention_mask": torch.ones((1, 7), dtype=torch.long),
+        "generation_config": {"cache_mode": "trajectory", "prompt_tokens": 3},
+    }
+    cache = ((torch.ones((1, 1, 7, 2)), torch.ones((1, 1, 7, 2))),)
+
+    compressors._teacher_forced_generation_logits(
+        bundle,
+        cache,
+        torch.tensor([10, 11], dtype=torch.long),
+        model,
+        torch.device("cpu"),
+    )
+
+    assert model.seen == [(3, 4, 3), (4, 5, 4)]
+
+
 def test_random_projection_compression_writes_artifacts(tmp_path: Path):
     _write_run(tmp_path)
     result = run_compression(tmp_path, method="random", latent_dim=2, seed=0)
