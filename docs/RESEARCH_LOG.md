@@ -880,3 +880,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Let the firsttok run reach a complete checkpoint, then analyze with prompt-boundary reconstruction scans; use the sampled/effective KL distinction when interpreting future logs.
+
+## 2026-05-21 - Overfit capacity probes for full-trajectory temporal RAE
+
+### Worked
+
+- Created copied-cache overfit probes for 8 solved trajectories and one solved trajectory while the main firsttok run continued. The 8-record replay-KL probe with latent/hidden 2048, replay_steps=8, replay_weight=0.01 reduced replay KL early but did not reconstruct solved plans after 10 epochs. The one-record MSE-only probe also failed to overfit, ending near normalized MSE 0.98 after 25 epochs.
+
+### Did Not Work / Caveats
+
+- The current latent-only TemporalLSTMAutoEncoder did not memorize even one full trajectory under MSE-only training, so poor reconstruction is likely an architecture/optimization/capacity issue rather than only insufficient dataset epochs or final-answer bias.
+
+### Left To Do
+
+- Try a stronger trajectory codec: chunked/hierarchical latents or a decoder with token-wise cross-attention/MLP conditioning instead of a single latent repeated through an LSTM. Use one-record overfit as the required gate before restarting large-scale training.
