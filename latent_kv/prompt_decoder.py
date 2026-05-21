@@ -19,6 +19,7 @@ class PromptDecoderDatasetSummary:
     output_dir: str
     rows: int
     latent_dim: int
+    latent_shape: list[int]
     artifacts: dict[str, str]
 
 
@@ -83,7 +84,8 @@ def export_prompt_decoder_dataset(
         analysis_dir=str(analysis_dir),
         output_dir=str(output_dir),
         rows=len(rows),
-        latent_dim=int(latents.shape[-1]) if latents.ndim == 2 else 0,
+        latent_dim=int(latents.shape[-1]),
+        latent_shape=list(latents.shape),
         artifacts={
             "prompt_decoder_rows.jsonl": str(jsonl_path),
             "prompt_decoder_dataset.pt": str(pt_path),
