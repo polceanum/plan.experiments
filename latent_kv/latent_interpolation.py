@@ -1271,6 +1271,11 @@ def run_latent_interpolation(
                 replay_generation = None
                 parsed = None
                 correct = False
+                if max_new_tokens is None:
+                    source_budget = int(endpoint_record.get("generated_tokens") or 0)
+                    row_max_new_tokens = max(512, source_budget)
+                else:
+                    row_max_new_tokens = int(max_new_tokens)
                 try:
                     cache_override = _decode_latent_to_cache(
                         z=z,
@@ -1289,7 +1294,7 @@ def run_latent_interpolation(
                         model=replay_model,
                         tokenizer=tokenizer,
                         device=replay_device,
-                        max_new_tokens=int(max_new_tokens or endpoint_record.get("generated_tokens") or 32),
+                        max_new_tokens=row_max_new_tokens,
                         cache_override=cache_override,
                         return_metadata=True,
                     )
@@ -1329,7 +1334,7 @@ def run_latent_interpolation(
                     "cache_validation": validation_payload,
                     "replay_error": error,
                     "model_id": chosen_model,
-                    "replay_max_new_tokens": int(max_new_tokens or endpoint_record.get("generated_tokens") or 32),
+                    "replay_max_new_tokens": row_max_new_tokens,
                     "a_task_id": pair.a_task_id,
                     "b_task_id": pair.b_task_id,
                     "a_primary_category": pair.a_primary_category,

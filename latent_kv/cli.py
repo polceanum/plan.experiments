@@ -833,7 +833,12 @@ def build_parser() -> argparse.ArgumentParser:
     latent_interpolate.add_argument("--device", default="cpu", help="Device for RAE latent decoding.")
     latent_interpolate.add_argument("--replay-device", default="auto", help="Device for local LLM replay.")
     latent_interpolate.add_argument("--model-id", default=None, help="Local model for replay. Defaults to source record model_id.")
-    latent_interpolate.add_argument("--max-new-tokens", type=int, default=None, help="Replay token budget. Defaults to endpoint source generated_tokens.")
+    latent_interpolate.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Fixed replay token budget. Defaults to max(512, endpoint source generated_tokens).",
+    )
     latent_interpolate.add_argument("--progress-every", type=int, default=25, help="Print replay progress every N rows; 0 disables progress.")
     latent_interpolate.add_argument("--selection", default="nearest", choices=["nearest", "spread"], help="Pair selection strategy within each pair-mode bucket.")
     latent_interpolate.add_argument("--min-distance", type=float, default=0.0, help="Minimum cosine distance between endpoints.")

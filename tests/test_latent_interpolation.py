@@ -300,7 +300,12 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
         ),
     )
     monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
-    monkeypatch.setattr(interpolation, "greedy_continue_from_loaded_bundle", lambda **kwargs: "The answer is 1")
+    replay_budgets: list[int] = []
+    monkeypatch.setattr(
+        interpolation,
+        "greedy_continue_from_loaded_bundle",
+        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"]) or "The answer is 1",
+    )
 
     summary = run_latent_interpolation(
         run_dir,
@@ -314,6 +319,7 @@ def test_run_latent_interpolation_writes_inspectable_rows(tmp_path: Path, monkey
 
     assert summary.pairs == 1
     assert summary.replay_rows == 4
+    assert replay_budgets == [512, 512, 512, 512]
     rows = (run_dir / "analysis" / "interpolations_epoch_1" / "interpolation_replays.jsonl").read_text(encoding="utf-8")
     assert '"replay_context": "a"' in rows
     assert '"replay_context": "b"' in rows
