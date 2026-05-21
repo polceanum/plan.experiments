@@ -76,6 +76,7 @@ class ReconstructionScanSummary:
     max_new_tokens: int | None
     max_effective_new_tokens: int
     token_budget_policy: str
+    token_cap_hits: int
     artifacts: dict[str, str]
 
 
@@ -1067,13 +1068,18 @@ def run_reconstruction_scan(
     for scan_index, idx in enumerate(indices, start=1):
         record = records[idx]
         annotation = annotations[idx]
-        row_max_new_tokens = int(max_new_tokens or record.get("generated_tokens") or 320)
+        if max_new_tokens is None:
+            source_budget = int(record.get("generated_tokens") or 0)
+            row_max_new_tokens = max(512, source_budget)
+        else:
+            row_max_new_tokens = int(max_new_tokens)
         effective_budgets.append(row_max_new_tokens)
         bundle = load_cache_bundle(Path(str(record["cache_path"])))
         endpoint_shapes = bundle.get("shapes") or cache_shapes(bundle["cache"])
         aligned_shapes = _aligned_shapes_for_checkpoint(endpoint_shapes, seq_len)
         error = None
         validation_payload = None
+        replay_generation = None
         output = ""
         parsed = None
         correct = False
@@ -1091,14 +1097,19 @@ def run_reconstruction_scan(
             validation_payload = asdict(validation)
             if not validation.valid:
                 raise ValueError(";".join(validation.errors))
-            output = greedy_continue_from_loaded_bundle(
+            replay_result = greedy_continue_from_loaded_bundle(
                 bundle=bundle,
                 model=replay_model,
                 tokenizer=tokenizer,
                 device=replay_device,
                 max_new_tokens=row_max_new_tokens,
                 cache_override=cache_override,
+                return_metadata=True,
             )
+            if not isinstance(replay_result, dict):
+                raise TypeError("Expected replay metadata dictionary from greedy continuation")
+            replay_generation = {key: value for key, value in replay_result.items() if key != "text"}
+            output = str(replay_result.get("text") or "")
             parsed, correct = verify_output(output, _record_to_example(record))
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -1125,6 +1136,7 @@ def run_reconstruction_scan(
                 "decoded_convincing": bool(faithfulness["convincing"]),
                 "faithfulness": faithfulness,
                 "cache_validation": validation_payload,
+                "replay_generation": replay_generation,
                 "replay_error": error,
                 "model_id": chosen_model,
                 "max_new_tokens": row_max_new_tokens,
@@ -1151,7 +1163,8 @@ def run_reconstruction_scan(
         replay_failures=sum(1 for row in rows if row.get("replay_error")),
         max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else None,
         max_effective_new_tokens=max(effective_budgets) if effective_budgets else 0,
-        token_budget_policy="fixed" if max_new_tokens is not None else "source_generated_tokens_or_320",
+        token_budget_policy="fixed" if max_new_tokens is not None else "max_512_or_source_generated_tokens",
+        token_cap_hits=sum(1 for row in rows if (row.get("replay_generation") or {}).get("hit_max_tokens")),
         artifacts={"reconstruction_replays.jsonl": str(rows_path)},
     )
     write_json(output_dir / "reconstruction_scan_summary.json", asdict(summary))

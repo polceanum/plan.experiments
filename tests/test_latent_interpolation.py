@@ -454,7 +454,14 @@ def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, mon
     monkeypatch.setattr(
         interpolation,
         "greedy_continue_from_loaded_bundle",
-        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"]) or "The answer is 1",
+        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"])
+        or {
+            "text": "The answer is 1",
+            "generated_tokens": 3,
+            "max_new_tokens": kwargs["max_new_tokens"],
+            "hit_max_tokens": False,
+            "stop_reason": "eos",
+        },
     )
 
     summary = run_reconstruction_scan(
@@ -477,9 +484,10 @@ def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, mon
     assert "decoded_convincing" in rows
     assert "faithfulness" in rows
     assert "original_output" in rows
+    assert "replay_generation" in rows
 
 
-def test_run_reconstruction_scan_defaults_to_source_generation_budget(tmp_path: Path, monkeypatch):
+def test_run_reconstruction_scan_defaults_to_generous_source_generation_budget(tmp_path: Path, monkeypatch):
     run_dir = _write_interpolation_run(tmp_path)
     checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
     replay_budgets: list[int] = []
@@ -499,7 +507,14 @@ def test_run_reconstruction_scan_defaults_to_source_generation_budget(tmp_path: 
     monkeypatch.setattr(
         interpolation,
         "greedy_continue_from_loaded_bundle",
-        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"]) or "The answer is 1",
+        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"])
+        or {
+            "text": "The answer is 1",
+            "generated_tokens": 3,
+            "max_new_tokens": kwargs["max_new_tokens"],
+            "hit_max_tokens": False,
+            "stop_reason": "eos",
+        },
     )
 
     summary = run_reconstruction_scan(
@@ -509,7 +524,8 @@ def test_run_reconstruction_scan_defaults_to_source_generation_budget(tmp_path: 
         progress_every=0,
     )
 
-    assert replay_budgets == [4, 4]
+    assert replay_budgets == [512, 512]
     assert summary.max_new_tokens is None
-    assert summary.max_effective_new_tokens == 4
-    assert summary.token_budget_policy == "source_generated_tokens_or_320"
+    assert summary.max_effective_new_tokens == 512
+    assert summary.token_budget_policy == "max_512_or_source_generated_tokens"
+    assert summary.token_cap_hits == 0

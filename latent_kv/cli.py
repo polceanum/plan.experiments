@@ -866,7 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-new-tokens",
         type=int,
         default=None,
-        help="Replay token budget. Defaults to each source record's generated_tokens, or 320 if unavailable.",
+        help="Fixed replay token budget. Defaults to max(512, each source record's generated_tokens).",
     )
     reconstruction_scan.add_argument("--limit", type=int, default=None, help="Optional solved-source endpoint limit for smoke scans.")
     reconstruction_scan.add_argument("--progress-every", type=int, default=25, help="Print scan progress every N endpoints; 0 disables progress.")
