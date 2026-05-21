@@ -536,6 +536,164 @@ class TemporalLSTMAutoEncoder(nn.Module):
         return self.decode(self.encode(sequence, token_mask=token_mask))
 
 
+class TemporalPositionwiseAutoEncoder(nn.Module):
+    def __init__(
+        self,
+        token_dim: int,
+        max_tokens: int,
+        latent_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+    ) -> None:
+        super().__init__()
+        self.token_dim = token_dim
+        self.max_tokens = max_tokens
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.token_to_hidden = nn.Sequential(
+            nn.Linear(token_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
+        self.encoder = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+        self.to_latent = nn.Linear(hidden_dim * 2, latent_dim)
+        self.latent_to_decoder_input = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, token_dim),
+        )
+
+    def encode(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        projected = self.token_to_hidden(sequence)
+        encoded, (hidden, _) = self.encoder(projected)
+        if token_mask is None:
+            pooled = encoded.mean(dim=1)
+        else:
+            weights = token_mask.float().unsqueeze(-1)
+            pooled = (encoded * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        summary = torch.cat([hidden[-1], pooled], dim=-1)
+        return self.to_latent(summary)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        batch = z.shape[0]
+        latent = self.latent_to_decoder_input(z).unsqueeze(1).expand(batch, self.max_tokens, self.hidden_dim)
+        positions = self.decoder_positions.unsqueeze(0).expand(batch, self.max_tokens, self.hidden_dim)
+        return self.decoder(torch.cat([latent, positions], dim=-1))
+
+    def forward(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        return self.decode(self.encode(sequence, token_mask=token_mask))
+
+
+class TemporalChunkedAutoEncoder(nn.Module):
+    def __init__(
+        self,
+        token_dim: int,
+        max_tokens: int,
+        latent_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+        chunk_size: int = 16,
+    ) -> None:
+        super().__init__()
+        self.token_dim = token_dim
+        self.max_tokens = max_tokens
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.chunk_size = max(1, int(chunk_size))
+        self.num_chunks = (max_tokens + self.chunk_size - 1) // self.chunk_size
+        self.token_to_hidden = nn.Sequential(
+            nn.Linear(token_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.to_latent = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        self.latent_to_hidden = nn.Linear(latent_dim, hidden_dim)
+        self.chunk_positions = nn.Parameter(torch.randn(self.num_chunks, hidden_dim) * 0.02)
+        self.token_positions = nn.Parameter(torch.randn(self.chunk_size, hidden_dim) * 0.02)
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, token_dim),
+        )
+
+    def _pad_sequence(self, sequence: torch.Tensor) -> torch.Tensor:
+        padded_tokens = self.num_chunks * self.chunk_size
+        if sequence.shape[1] == padded_tokens:
+            return sequence
+        pad_tokens = padded_tokens - sequence.shape[1]
+        return torch.nn.functional.pad(sequence, (0, 0, 0, pad_tokens))
+
+    def _pad_mask(self, token_mask: torch.Tensor | None, batch: int, device: torch.device) -> torch.Tensor:
+        padded_tokens = self.num_chunks * self.chunk_size
+        if token_mask is None:
+            return torch.ones((batch, padded_tokens), dtype=torch.bool, device=device)
+        mask = token_mask.to(device=device, dtype=torch.bool)
+        if mask.shape[1] == padded_tokens:
+            return mask
+        return torch.nn.functional.pad(mask, (0, padded_tokens - mask.shape[1]))
+
+    def encode(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        batch = sequence.shape[0]
+        padded = self._pad_sequence(sequence)
+        mask = self._pad_mask(token_mask, batch, sequence.device)
+        hidden = self.token_to_hidden(padded)
+        hidden = hidden.reshape(batch, self.num_chunks, self.chunk_size, self.hidden_dim)
+        chunk_mask = mask.reshape(batch, self.num_chunks, self.chunk_size).float().unsqueeze(-1)
+        pooled = (hidden * chunk_mask).sum(dim=2) / chunk_mask.sum(dim=2).clamp_min(1.0)
+        return self.to_latent(pooled)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        if z.dim() == 2:
+            z = z.unsqueeze(1).expand(z.shape[0], self.num_chunks, z.shape[-1])
+        if z.shape[1] != self.num_chunks:
+            raise ValueError(f"Expected {self.num_chunks} latent chunks, got {z.shape[1]}")
+        batch = z.shape[0]
+        latent = self.latent_to_hidden(z).unsqueeze(2).expand(batch, self.num_chunks, self.chunk_size, self.hidden_dim)
+        chunk_pos = self.chunk_positions.unsqueeze(0).unsqueeze(2).expand(
+            batch, self.num_chunks, self.chunk_size, self.hidden_dim
+        )
+        token_pos = self.token_positions.unsqueeze(0).unsqueeze(0).expand(
+            batch, self.num_chunks, self.chunk_size, self.hidden_dim
+        )
+        decoded = self.decoder(torch.cat([latent, chunk_pos, token_pos], dim=-1))
+        return decoded.reshape(batch, self.num_chunks * self.chunk_size, self.token_dim)[:, : self.max_tokens, :]
+
+    def forward(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        return self.decode(self.encode(sequence, token_mask=token_mask))
+
+
+def _temporal_model_class(codec_kind: str) -> type[nn.Module]:
+    kind = codec_kind.lower()
+    if kind in {"lstm", "temporal_lstm_rae"}:
+        return TemporalLSTMAutoEncoder
+    if kind in {"positionwise", "mlp", "temporal_positionwise_rae"}:
+        return TemporalPositionwiseAutoEncoder
+    if kind in {"chunked", "temporal_chunked_rae"}:
+        return TemporalChunkedAutoEncoder
+    raise ValueError("temporal codec kind must be lstm, positionwise, or chunked")
+
+
 def train_autoencoder(
     x: torch.Tensor,
     latent_dim: int,
@@ -604,7 +762,10 @@ def train_temporal_lstm_autoencoder(
     grad_clip_norm: float = 0.0,
     mps_empty_cache_every_batches: int = 0,
     replay_loss_every_n_batches: int = 1,
-) -> tuple[TemporalLSTMAutoEncoder, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
+    temporal_codec_kind: str = "chunked",
+    temporal_chunk_size: int = 1,
+    checkpoint_stem: str = "rae_temporal",
+) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
@@ -630,14 +791,18 @@ def train_temporal_lstm_autoencoder(
     print(f"[rae_temporal] Normalization complete. mean shape: {mean.shape}, std shape: {std.shape}", flush=True)
     mean_device = mean.to(training_device)
     std_device = std.to(training_device)
-    print("[rae_temporal] Constructing model...", flush=True)
-    model = TemporalLSTMAutoEncoder(
-        token_dim=sequence.shape[-1],
-        max_tokens=sequence.shape[1],
-        latent_dim=latent_dim,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-    ).to(training_device)
+    model_class = _temporal_model_class(temporal_codec_kind)
+    print(f"[rae_temporal] Constructing {temporal_codec_kind} model...", flush=True)
+    model_kwargs = {
+        "token_dim": sequence.shape[-1],
+        "max_tokens": sequence.shape[1],
+        "latent_dim": latent_dim,
+        "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
+    }
+    if temporal_codec_kind == "chunked":
+        model_kwargs["chunk_size"] = max(1, int(temporal_chunk_size))
+    model = model_class(**model_kwargs).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
     resume_epoch = 0
     if resume_checkpoint_path is not None:
@@ -737,6 +902,8 @@ def train_temporal_lstm_autoencoder(
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "replay_loss_every_n_batches": int(replay_loss_every_n_batches),
+        "temporal_codec_kind": temporal_codec_kind,
+        "temporal_chunk_size": getattr(model, "chunk_size", None),
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
@@ -876,6 +1043,8 @@ def train_temporal_lstm_autoencoder(
                 "weight_decay": weight_decay,
                 "train_batch_size": batch_size,
                 "memory_gb": mem_gb,
+                "temporal_codec_kind": temporal_codec_kind,
+                "temporal_chunk_size": getattr(model, "chunk_size", None),
             }
             history.append(event)
             if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
@@ -910,10 +1079,12 @@ def train_temporal_lstm_autoencoder(
                     "grad_clip_norm": float(grad_clip_norm),
                     "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                     "weight_decay": weight_decay,
+                    "temporal_codec_kind": temporal_codec_kind,
+                    "chunk_size": getattr(model, "chunk_size", None),
                 }
-                checkpoint_path = checkpoint_dir / f"rae_temporal_epoch_{epoch:06d}.pt"
+                checkpoint_path = checkpoint_dir / f"{checkpoint_stem}_epoch_{epoch:06d}.pt"
                 _atomic_torch_save(checkpoint, checkpoint_path)
-                _atomic_torch_save(checkpoint, checkpoint_dir / "rae_temporal_latest.pt")
+                _atomic_torch_save(checkpoint, checkpoint_dir / f"{checkpoint_stem}_latest.pt")
         except Exception as exc:
             _append_training_event(
                 progress_path,
@@ -969,8 +1140,15 @@ def train_temporal_lstm_autoencoder(
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "regularization": "adamw_weight_decay_only",
         "train_batch_size": batch_size,
-        "decoder_conditioning": "latent_repeated_input_plus_learned_temporal_position",
-        "latent_summary": "last_hidden_plus_masked_mean_encoded",
+        "decoder_conditioning": "chunk_latents_plus_learned_chunk_and_token_positions"
+        if temporal_codec_kind == "chunked"
+        else "latent_repeated_input_plus_learned_temporal_position",
+        "temporal_codec_kind": temporal_codec_kind,
+        "chunk_size": getattr(model, "chunk_size", None),
+        "num_chunks": getattr(model, "num_chunks", None),
+        "latent_summary": "per_chunk_masked_mean_encoded"
+        if temporal_codec_kind == "chunked"
+        else "last_hidden_plus_masked_mean_encoded",
         "token_projection": "linear_layernorm_gelu",
         "latent_encoding_input": "masked_normalized_temporal_token_cache",
         "input_representation": "temporal_full_cache_token_states",
@@ -1016,6 +1194,7 @@ def run_compression(
     grad_clip_norm: float = 0.0,
     mps_empty_cache_every_batches: int = 0,
     replay_loss_every_n_batches: int = 1,
+    temporal_chunk_size: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -1026,6 +1205,15 @@ def run_compression(
     progress_path = artifact_dir / f"{method}_training.jsonl"
     if progress_path.exists() and resume_checkpoint_path is None:
         progress_path.write_text("", encoding="utf-8")
+    temporal_methods = {
+        "rae_temporal",
+        "temporal_rae",
+        "temporal_lstm",
+        "rae_temporal_mlp",
+        "temporal_positionwise",
+        "rae_temporal_chunked",
+        "temporal_chunked",
+    }
     artifact: dict[str, Any] = {"method": method, "latent_dim": latent_dim}
     if method in {"random", "random_projection"}:
         compressor = RandomProjectionCompressor(x.shape[1], latent_dim, seed=seed)
@@ -1050,7 +1238,15 @@ def run_compression(
         z = compressor.encode(x).detach()
         reconstructed = compressor.decode(z).detach()
         artifact.update({"state_dict": compressor.state_dict(), "train_mse": mse, "training_history": history})
-    elif method in {"rae_temporal", "temporal_rae", "temporal_lstm"}:
+    elif method in temporal_methods:
+        if method in {"rae_temporal_mlp", "temporal_positionwise"}:
+            temporal_codec_kind = "positionwise"
+        elif method in {"rae_temporal_chunked", "temporal_chunked"}:
+            temporal_codec_kind = "chunked"
+        elif method in {"rae_temporal", "temporal_rae"}:
+            temporal_codec_kind = "chunked"
+        else:
+            temporal_codec_kind = "lstm"
         compressor, reconstructed, mse, stats, history = train_temporal_lstm_autoencoder(
             x,
             cache_matrix.shapes,
@@ -1080,6 +1276,9 @@ def run_compression(
             grad_clip_norm=grad_clip_norm,
             mps_empty_cache_every_batches=mps_empty_cache_every_batches,
             replay_loss_every_n_batches=replay_loss_every_n_batches,
+            temporal_codec_kind=temporal_codec_kind,
+            temporal_chunk_size=temporal_chunk_size,
+            checkpoint_stem=method,
         )
         mean = stats.pop("normalization_mean")
         std = stats.pop("normalization_std")
@@ -1105,7 +1304,9 @@ def run_compression(
                 "train_mse": mse,
                 "normalization_mean": mean,
                 "normalization_std": std,
-                "codec_kind": "temporal_lstm_rae",
+                "codec_kind": f"temporal_{temporal_codec_kind}_rae"
+                if temporal_codec_kind != "lstm"
+                else "temporal_lstm_rae",
                 "training_history": history,
                 **stats,
             }
@@ -1115,7 +1316,10 @@ def run_compression(
         reconstructed, _ = nearest_neighbor_reconstruct(x)
         artifact.update({"note": "nearest-neighbour cache reconstruction baseline"})
     else:
-        raise ValueError("method must be random, pca_svd, autoencoder, rae_temporal, or retrieval")
+        raise ValueError(
+            "method must be random, pca_svd, autoencoder, rae_temporal, rae_temporal_mlp, "
+            "rae_temporal_chunked, or retrieval"
+        )
 
     compact_reconstructed = _compact_reconstructions(reconstructed, cache_matrix.shapes, cache_matrix.aligned_shapes)
     compact_original = _compact_reconstructions(x, cache_matrix.shapes, cache_matrix.aligned_shapes)
@@ -1138,9 +1342,13 @@ def run_compression(
                 "point_codec": True,
                 "geometry_only": False,
                 "input_representation": "temporal_full_cache_token_states"
-                if method in {"rae_temporal", "temporal_rae", "temporal_lstm"}
+                if method in temporal_methods
                 else "flattened_full_cache",
                 "one_latent_per_cache": True,
+                "structured_latent_per_cache": method in temporal_methods and artifact.get("temporal_codec_kind") == "chunked",
+                "one_global_latent_vector_per_cache": not (
+                    method in temporal_methods and artifact.get("temporal_codec_kind") == "chunked"
+                ),
                 "decodes_to": "flattened_cache_vector",
             },
             "training_log_path": str(progress_path) if progress_path.exists() else None,
@@ -1162,7 +1370,7 @@ def run_compression(
             "training_log_written": 1.0 if progress_path.exists() else 0.0,
             "deprecated_frozen_prompt_transition_gradients": 0.0,
             "teacher_forced_generation_replay_gradients": 1.0
-            if method in {"rae_temporal", "temporal_rae", "temporal_lstm"} and replay_loss_weight > 0
+            if method in temporal_methods and replay_loss_weight > 0
             else 0.0,
         },
     )

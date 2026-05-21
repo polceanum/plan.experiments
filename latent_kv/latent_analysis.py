@@ -17,6 +17,7 @@ import torch
 from .cache import cache_shapes, load_cache_bundle
 from .compressors import (
     TemporalLSTMAutoEncoder,
+    _temporal_model_class,
     _aligned_cache_shapes,
     _flatten_to_shapes,
     _temporal_matrix,
@@ -222,13 +223,21 @@ def latest_complete_checkpoint(run_dir: Path, method: str = "rae_temporal") -> P
 
 def _load_checkpoint_model(checkpoint_path: Path) -> tuple[TemporalLSTMAutoEncoder, dict[str, Any]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model = TemporalLSTMAutoEncoder(
-        token_dim=int(checkpoint["token_dim"]),
-        max_tokens=int(checkpoint["seq_len"]),
-        latent_dim=int(checkpoint["latent_dim"]),
-        hidden_dim=int(checkpoint.get("hidden_dim", 128)),
-        num_layers=int(checkpoint.get("num_layers", 1)),
-    )
+    codec_kind = str(checkpoint.get("temporal_codec_kind") or checkpoint.get("codec_kind") or "lstm")
+    model_class = _temporal_model_class(codec_kind)
+    model_kwargs = {
+        "token_dim": int(checkpoint["token_dim"]),
+        "max_tokens": int(checkpoint["seq_len"]),
+        "latent_dim": int(checkpoint["latent_dim"]),
+        "hidden_dim": int(checkpoint.get("hidden_dim", 128)),
+        "num_layers": int(checkpoint.get("num_layers", 1)),
+    }
+    if str(checkpoint.get("temporal_codec_kind") or checkpoint.get("codec_kind") or "").lower() in {
+        "chunked",
+        "temporal_chunked_rae",
+    }:
+        model_kwargs["chunk_size"] = int(checkpoint.get("chunk_size") or 16)
+    model = model_class(**model_kwargs)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     return model, checkpoint
@@ -276,7 +285,8 @@ def extract_checkpoint_latents(
             batch_temporal = _temporal_matrix(batch_vectors, aligned_shapes)
             batch_mask = token_mask[start:stop]
             normalized = ((batch_temporal - mean) / std) * batch_mask.unsqueeze(-1).float()
-            latents.append(model.encode(normalized, token_mask=batch_mask).cpu())
+            batch_latents = model.encode(normalized, token_mask=batch_mask).cpu()
+            latents.append(batch_latents)
             if progress_every_batches > 0 and (batch_index == 1 or batch_index == total_batches or batch_index % progress_every_batches == 0):
                 print(
                     f"[latent-analysis] encoded batch {batch_index}/{total_batches} records={stop}/{len(records)}",
@@ -299,9 +309,13 @@ def extract_checkpoint_latents(
 
 def pca_2d(latents: torch.Tensor) -> tuple[torch.Tensor, list[float]]:
     x = latents.detach().cpu().float()
+    if x.ndim != 2:
+        x = x.reshape(x.shape[0], -1)
+    if x.shape[0] == 1:
+        return torch.zeros((1, 2), dtype=x.dtype), [0.0, 0.0]
     centered = x - x.mean(dim=0, keepdim=True)
-    if centered.shape[0] < 2:
-        raise ValueError("PCA requires at least two latent rows")
+    if centered.shape[0] < 1:
+        raise ValueError("PCA requires at least one latent row")
     _, singular_values, v = torch.pca_lowrank(centered, q=2, center=False)
     coords = centered @ v[:, :2]
     variances = singular_values[:2].pow(2) / max(centered.shape[0] - 1, 1)

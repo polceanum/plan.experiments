@@ -894,3 +894,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Try a stronger trajectory codec: chunked/hierarchical latents or a decoder with token-wise cross-attention/MLP conditioning instead of a single latent repeated through an LSTM. Use one-record overfit as the required gate before restarting large-scale training.
+
+## 2026-05-21 - Replace global trajectory latent with structured temporal codec
+
+### Worked
+
+- Found the one-record full-trajectory overfit failure was architectural: the single global TemporalLSTMAutoEncoder stayed near normalized MSE 1.0. Added a structured temporal chunk codec and made rae_temporal use it by default with tokenwise chunk_size=1. The one-record gate now drops immediately, e.g. default rae_temporal latent_dim=512 hidden_dim=1024 reached normalized MSE 0.431 by epoch 40, and a larger tokenwise probe reached 0.290 by epoch 120. Checkpoint, latent-analysis, and interpolation paths now preserve structured latent shapes for decoding while flattening only for PCA/distance.
+
+### Did Not Work / Caveats
+
+- Chunk sizes larger than one and wider hidden dimensions did not solve replay by themselves: chunk_size=16 reached about 0.406 after 60 epochs, and chunk_size=8 with a larger model still ended around 0.400 after 300 epochs. Behavioural replay from these intermediate-MSE checkpoints can still emit blank or generic continuations, so lower reconstruction error is still required before interpreting interpolations.
+
+### Left To Do
+
+- Use the structured rae_temporal codec for the next real run, starting with solved-only full trajectories and conservative replay KL only after the MSE-only gate reaches much lower error. Treat old single-global-latent trajectory runs as deprecated diagnostics, not evidence about the fixed codec.

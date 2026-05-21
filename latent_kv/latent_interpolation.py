@@ -105,7 +105,8 @@ def _candidate_pairs(
     if not correct_indices:
         return []
     index_tensor = torch.tensor(correct_indices, dtype=torch.long)
-    normalized = torch.nn.functional.normalize(latents.float()[index_tensor], dim=-1)
+    latent_vectors = latents.float().reshape(latents.shape[0], -1)
+    normalized = torch.nn.functional.normalize(latent_vectors[index_tensor], dim=-1)
     distances = 1.0 - (normalized @ normalized.T)
     candidates = []
     for pos, a_idx in enumerate(correct_indices):
@@ -493,7 +494,11 @@ def _decode_latent_to_cache(
     std: torch.Tensor,
 ) -> Any:
     with torch.no_grad():
-        decoded = model.decode(z.reshape(1, -1)).squeeze(0).cpu()
+        if z.dim() == 1:
+            model_input = z.reshape(1, -1)
+        else:
+            model_input = z.unsqueeze(0)
+        decoded = model.decode(model_input).squeeze(0).cpu()
     sequence = (decoded * std.squeeze(0).cpu()) + mean.squeeze(0).cpu()
     aligned_vector = _temporal_to_aligned_vector(sequence, aligned_shapes)
     compact_vector = _aligned_to_compact(aligned_vector, endpoint_shapes, aligned_shapes)

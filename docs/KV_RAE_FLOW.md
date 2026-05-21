@@ -1,6 +1,6 @@
 # KV RAE End-to-End Flow
 
-This note describes the `rae_temporal` point-codec paths in the latent-KV
+This note describes the `rae_temporal` trajectory-codec paths in the latent-KV
 planning prototype. The original prompt-cache path used this contract:
 
 ```text
@@ -15,10 +15,19 @@ full-trajectory path we now want to test uses:
 
 ```text
 problem prompt + generated reasoning KV-cache temporal sequence
-  -> one latent trajectory point
+  -> structured latent trajectory state
   -> decoded KV-cache temporal sequence
   -> replay/inspect recovered plan
 ```
+
+Earlier `rae_temporal` experiments collapsed the whole temporal cache sequence
+into a single global latent vector. That shape was too destructive for
+full-trajectory caches: a one-record MSE overfit probe stayed near normalized
+MSE 1.0. The current default `rae_temporal` codec is therefore structured: it
+encodes token-time chunks, with the default `--temporal-chunk-size 1` creating
+one latent slot per temporal KV token. PCA and pair selection can flatten that
+structured latent for geometry, but decoding preserves the chunk/token latent
+shape.
 
 The RAE decoder reconstructs transformer KV state. It does not directly decode
 an answer string. The local LLM then performs normal autoregressive decoding
@@ -52,8 +61,9 @@ model state; it only rewrites the status/readable files from JSONL telemetry.
 During training, the local LLM may also be used as a frozen differentiable
 critic through teacher-forced generated-token replay KL. Gradients flow through
 reconstructed KV tensors into the RAE, but the LLM weights stay frozen. This is
-optional and auxiliary; the codec still learns sequence-to-point-to-sequence
-cache reconstruction. It is not a final-answer correctness loss.
+optional and auxiliary; the codec still learns temporal cache reconstruction
+from a structured latent trajectory state. It is not a final-answer correctness
+loss.
 
 ## Full Flow
 
@@ -136,21 +146,21 @@ cache reconstruction. It is not a final-answer correctness loss.
                                |
                                v
                     +---------------------+
-                    | LSTM encoder        |
-                    | reads token time    |
+                    | structured encoder  |
+                    | reads token chunks  |
                     +---------------------+
                                |
                                v
-        encoder summary: last hidden + masked mean encoded state
+        per-chunk masked encoded state
                                |
                                v
                     +---------------------+
-                    | linear summary -> z |
+                    | chunk encoder -> z  |
                     +---------------------+
                                |
                                v
-        one latent plan point
-        z: [latent_dim]
+        structured latent plan state
+        z: [num_chunks, latent_dim]
         carries source_labels:
         task_id, correct, target, parsed_answer, prompt_protocol
                                |
@@ -294,9 +304,9 @@ Problem
   -> original temporal KV-cache sequence
   -> verifier-labelled cache datapoint
   -> align / temporalize / normalize
-  -> LSTM encoder over token time
-  -> latent plan point z
-  -> LSTM decoder over token time
+  -> structured chunk/token encoder over token time
+  -> latent plan state z
+  -> chunk/token decoder over token time
   -> reconstructed temporal KV-cache sequence
   -> optional frozen-LLM generated-token replay KL gradients during training
   -> LLM continuation from reconstructed cache
@@ -331,7 +341,7 @@ generated reasoning continuation. This matches the scientific object:
 
 ```text
 [problem statement, reasoning steps, answer]
-  -> one latent trajectory point
+  -> structured latent trajectory state
   -> reconstructed [problem statement, reasoning steps, answer] cache state
 ```
 
@@ -473,8 +483,8 @@ Plan/cache sequences keep their original token lengths. Different prompts and
 different reasoning continuations naturally produce different token counts, and
 those lengths are part of the behavioural trace. For batching, the codec pads
 the token axis to a common maximum length and stores token masks, original
-vector lengths, and cache shapes. The scientific object remains one latent
-point per original variable-length temporal sequence.
+vector lengths, and cache shapes. The scientific object is one structured latent
+trajectory per original variable-length temporal sequence, not one global vector.
 
 Replay should use the source record's original generation budget unless an
 experiment explicitly overrides it. Cache bundles for new prompt-cache

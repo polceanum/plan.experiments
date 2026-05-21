@@ -9,7 +9,10 @@ from latent_kv.cache import CacheTuple, flatten_cache, load_cache_bundle, save_c
 from latent_kv.behavior import _load_reconstructed_cache
 from latent_kv.codec_validation import validate_cache_against_bundle, validate_reconstructed_artifact
 from latent_kv.compressors import (
+    TemporalChunkedAutoEncoder,
     TemporalLSTMAutoEncoder,
+    TemporalPositionwiseAutoEncoder,
+    _temporal_model_class,
     _compact_reconstructions,
     _temporal_matrix,
     _temporal_token_mask,
@@ -331,6 +334,30 @@ def test_temporal_lstm_autoencoder_maps_token_sequence_to_one_point():
     assert decoded.shape == x.shape
 
 
+def test_temporal_positionwise_autoencoder_maps_token_sequence_to_one_point():
+    model = TemporalPositionwiseAutoEncoder(token_dim=4, max_tokens=5, latent_dim=3, hidden_dim=6)
+    x = torch.randn(2, 5, 4)
+    mask = torch.tensor([[True, True, True, True, True], [True, True, True, False, False]])
+
+    z = model.encode(x, token_mask=mask)
+    decoded = model.decode(z)
+
+    assert z.shape == (2, 3)
+    assert decoded.shape == x.shape
+
+
+def test_temporal_chunked_autoencoder_maps_token_sequence_to_chunked_points():
+    model = TemporalChunkedAutoEncoder(token_dim=4, max_tokens=5, latent_dim=3, hidden_dim=6, chunk_size=2)
+    x = torch.randn(2, 5, 4)
+    mask = torch.tensor([[True, True, True, True, True], [True, True, True, False, False]])
+
+    z = model.encode(x, token_mask=mask)
+    decoded = model.decode(z)
+
+    assert z.shape == (2, 3, 3)
+    assert decoded.shape == x.shape
+
+
 def test_temporal_rae_compression_uses_token_time_axis(tmp_path: Path):
     _write_variable_length_run(tmp_path)
     result = run_compression(
@@ -348,11 +375,16 @@ def test_temporal_rae_compression_uses_token_time_axis(tmp_path: Path):
     payload = torch.load(result.latent_path, map_location="cpu")
     artifact = torch.load(result.artifact_path, map_location="cpu")
 
-    assert payload["latents"].shape == (2, 3)
+    assert payload["latents"].shape == (2, 4, 3)
     assert payload["codec_contract"]["input_representation"] == "temporal_full_cache_token_states"
+    assert payload["codec_contract"]["structured_latent_per_cache"] is True
+    assert payload["codec_contract"]["one_global_latent_vector_per_cache"] is False
     assert payload["lengths"] == [16, 12]
     assert payload["reconstructed"].shape[1] == 16
-    assert artifact["codec_kind"] == "temporal_lstm_rae"
+    assert artifact["codec_kind"] == "temporal_chunked_rae"
+    assert artifact["temporal_codec_kind"] == "chunked"
+    assert artifact["chunk_size"] == 1
+    assert artifact["num_chunks"] == 4
     assert artifact["seq_len"] == 4
     assert artifact["token_dim"] == 4
     assert artifact["input_representation"] == "temporal_full_cache_token_states"
@@ -366,6 +398,58 @@ def test_temporal_rae_compression_uses_token_time_axis(tmp_path: Path):
     assert validation.records == 2
     assert validation.one_point_per_cache is True
     assert validation.valid_caches == 2
+
+
+def test_temporal_mlp_rae_compression_writes_codec_kind(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal_mlp",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        log_every=1,
+    )
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    checkpoint = torch.load(
+        tmp_path / "compressions" / "rae_temporal_mlp_checkpoints" / "rae_temporal_mlp_latest.pt",
+        map_location="cpu",
+    ) if (tmp_path / "compressions" / "rae_temporal_mlp_checkpoints" / "rae_temporal_mlp_latest.pt").exists() else None
+
+    assert artifact["codec_kind"] == "temporal_positionwise_rae"
+    assert artifact["temporal_codec_kind"] == "positionwise"
+    if checkpoint is not None:
+        assert checkpoint["temporal_codec_kind"] == "positionwise"
+
+
+def test_temporal_chunked_rae_compression_writes_codec_metadata(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal_chunked",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=5,
+        log_every=1,
+        checkpoint_every=1,
+        temporal_chunk_size=2,
+    )
+    payload = torch.load(result.latent_path, map_location="cpu")
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    checkpoint = torch.load(
+        tmp_path / "compressions" / "rae_temporal_chunked_checkpoints" / "rae_temporal_chunked_latest.pt",
+        map_location="cpu",
+    )
+
+    assert payload["latents"].shape == (2, 2, 3)
+    assert artifact["codec_kind"] == "temporal_chunked_rae"
+    assert artifact["temporal_codec_kind"] == "chunked"
+    assert artifact["chunk_size"] == 2
+    assert artifact["num_chunks"] == 2
+    assert checkpoint["temporal_codec_kind"] == "chunked"
+    assert checkpoint["chunk_size"] == 2
 
 
 def test_temporal_rae_rejects_deprecated_prompt_state_gradients(tmp_path: Path, monkeypatch):
@@ -557,7 +641,7 @@ def test_temporal_rae_can_train_in_mini_batches(tmp_path: Path):
     artifact = torch.load(result.artifact_path, map_location="cpu")
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
 
-    assert payload["latents"].shape == (2, 3)
+    assert payload["latents"].shape == (2, 4, 3)
     assert artifact["train_batch_size"] == 1
     epoch_rows = [row for row in training_rows if "train_batch_size" in row]
     assert epoch_rows[0]["train_batch_size"] == 1
@@ -582,12 +666,18 @@ def test_temporal_rae_latents_use_masked_normalized_token_states(tmp_path: Path)
     token_mask = _temporal_token_mask(cache_matrix.shapes, cache_matrix.aligned_shapes)
     normalized = ((temporal - artifact["normalization_mean"]) / artifact["normalization_std"]) * token_mask.unsqueeze(-1).float()
 
-    model = TemporalLSTMAutoEncoder(
-        token_dim=artifact["token_dim"],
-        max_tokens=artifact["seq_len"],
-        latent_dim=artifact["latent_dim"],
-        hidden_dim=artifact["hidden_dim"],
-        num_layers=artifact["num_layers"],
+    model_class = _temporal_model_class(artifact["temporal_codec_kind"])
+    model_kwargs = {
+        "token_dim": artifact["token_dim"],
+        "max_tokens": artifact["seq_len"],
+        "latent_dim": artifact["latent_dim"],
+        "hidden_dim": artifact["hidden_dim"],
+        "num_layers": artifact["num_layers"],
+    }
+    if artifact["temporal_codec_kind"] == "chunked":
+        model_kwargs["chunk_size"] = artifact["chunk_size"]
+    model = model_class(
+        **model_kwargs,
     )
     model.load_state_dict(artifact["state_dict"])
     with torch.no_grad():

@@ -85,6 +85,26 @@ def test_select_interpolation_pairs_filters_correct_and_mixed_modes():
     assert len({tuple(sorted((pair.a_index, pair.b_index))) for pair in pairs}) == len(pairs)
 
 
+def test_select_interpolation_pairs_flattens_structured_latents_for_distance():
+    latents = torch.tensor(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.9, 0.1], [0.1, 0.9]],
+            [[0.0, 1.0], [1.0, 0.0]],
+        ]
+    )
+    annotations = [
+        {"task_id": "a", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "b", "correct": True, "primary_category": "money_price_profit"},
+        {"task_id": "c", "correct": True, "primary_category": "rate_time_work"},
+    ]
+
+    pairs = select_interpolation_pairs(latents, annotations, pairs=1, pair_mode="same_category")
+
+    assert len(pairs) == 1
+    assert {pairs[0].a_index, pairs[0].b_index} == {0, 1}
+
+
 def test_select_interpolation_pairs_can_spread_and_filter_near_duplicates():
     latents = torch.tensor(
         [
@@ -156,6 +176,32 @@ class _FakeRAE(torch.nn.Module):
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         batch = int(z.shape[0])
         return torch.zeros(batch, 2, 2)
+
+
+class _ShapeCheckingRAE(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_shape: tuple[int, ...] | None = None
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        self.seen_shape = tuple(z.shape)
+        return torch.zeros(int(z.shape[0]), 2, 2)
+
+
+def test_decode_latent_to_cache_preserves_structured_latent_shape():
+    model = _ShapeCheckingRAE()
+
+    cache = interpolation._decode_latent_to_cache(
+        z=torch.zeros(2, 3),
+        endpoint_shapes=[((1, 1, 2, 1), (1, 1, 2, 1))],
+        aligned_shapes=[((1, 1, 2, 1), (1, 1, 2, 1))],
+        model=model,
+        mean=torch.zeros(1, 1, 2),
+        std=torch.ones(1, 1, 2),
+    )
+
+    assert model.seen_shape == (1, 2, 3)
+    assert cache[0][0].shape == (1, 1, 2, 1)
 
 
 def _write_interpolation_run(tmp_path: Path) -> Path:

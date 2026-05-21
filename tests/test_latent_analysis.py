@@ -51,3 +51,11 @@ def test_pca_2d_returns_finite_coordinates_and_variance():
     assert len(explained) == 2
     assert explained[0] >= 0.0
     assert sum(explained) <= 1.000001
+
+
+def test_pca_2d_handles_single_row_diagnostic_runs():
+    coords, explained = pca_2d(torch.randn(1, 2, 3))
+
+    assert coords.shape == (1, 2)
+    assert torch.equal(coords, torch.zeros_like(coords))
+    assert explained == [0.0, 0.0]
