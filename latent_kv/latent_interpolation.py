@@ -73,7 +73,9 @@ class ReconstructionScanSummary:
     solved_reconstructions: int
     convincing_reconstructions: int
     replay_failures: int
-    max_new_tokens: int
+    max_new_tokens: int | None
+    max_effective_new_tokens: int
+    token_budget_policy: str
     artifacts: dict[str, str]
 
 
@@ -1031,7 +1033,7 @@ def run_reconstruction_scan(
     latent_device_name: str = "cpu",
     replay_device_name: str = "auto",
     model_id: str | None = None,
-    max_new_tokens: int = 128,
+    max_new_tokens: int | None = None,
     limit: int | None = None,
     progress_every: int = 25,
 ) -> ReconstructionScanSummary:
@@ -1061,9 +1063,12 @@ def run_reconstruction_scan(
 
     rows: list[dict[str, Any]] = []
     total = len(indices)
+    effective_budgets: list[int] = []
     for scan_index, idx in enumerate(indices, start=1):
         record = records[idx]
         annotation = annotations[idx]
+        row_max_new_tokens = int(max_new_tokens or record.get("generated_tokens") or 320)
+        effective_budgets.append(row_max_new_tokens)
         bundle = load_cache_bundle(Path(str(record["cache_path"])))
         endpoint_shapes = bundle.get("shapes") or cache_shapes(bundle["cache"])
         aligned_shapes = _aligned_shapes_for_checkpoint(endpoint_shapes, seq_len)
@@ -1091,7 +1096,7 @@ def run_reconstruction_scan(
                 model=replay_model,
                 tokenizer=tokenizer,
                 device=replay_device,
-                max_new_tokens=int(max_new_tokens),
+                max_new_tokens=row_max_new_tokens,
                 cache_override=cache_override,
             )
             parsed, correct = verify_output(output, _record_to_example(record))
@@ -1122,7 +1127,7 @@ def run_reconstruction_scan(
                 "cache_validation": validation_payload,
                 "replay_error": error,
                 "model_id": chosen_model,
-                "max_new_tokens": int(max_new_tokens),
+                "max_new_tokens": row_max_new_tokens,
             }
         )
         if progress_every > 0 and (scan_index == 1 or scan_index == total or scan_index % progress_every == 0):
@@ -1144,7 +1149,9 @@ def run_reconstruction_scan(
         solved_reconstructions=sum(1 for row in rows if row.get("decoded_correct")),
         convincing_reconstructions=sum(1 for row in rows if row.get("decoded_convincing")),
         replay_failures=sum(1 for row in rows if row.get("replay_error")),
-        max_new_tokens=int(max_new_tokens),
+        max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else None,
+        max_effective_new_tokens=max(effective_budgets) if effective_budgets else 0,
+        token_budget_policy="fixed" if max_new_tokens is not None else "source_generated_tokens_or_320",
         artifacts={"reconstruction_replays.jsonl": str(rows_path)},
     )
     write_json(output_dir / "reconstruction_scan_summary.json", asdict(summary))

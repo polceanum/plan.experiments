@@ -437,6 +437,7 @@ def test_run_latent_interpolation_can_require_convincing_scan_rows(tmp_path: Pat
 def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, monkeypatch):
     run_dir = _write_interpolation_run(tmp_path)
     checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+    replay_budgets: list[int] = []
 
     monkeypatch.setattr(
         interpolation,
@@ -450,7 +451,11 @@ def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, mon
         ),
     )
     monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
-    monkeypatch.setattr(interpolation, "greedy_continue_from_loaded_bundle", lambda **kwargs: "The answer is 1")
+    monkeypatch.setattr(
+        interpolation,
+        "greedy_continue_from_loaded_bundle",
+        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"]) or "The answer is 1",
+    )
 
     summary = run_reconstruction_scan(
         run_dir,
@@ -463,8 +468,48 @@ def test_run_reconstruction_scan_writes_endpoint_replay_rows(tmp_path: Path, mon
     assert summary.scanned == 2
     assert summary.solved_reconstructions == 1
     assert summary.convincing_reconstructions == 0
+    assert summary.max_new_tokens == 4
+    assert summary.max_effective_new_tokens == 4
+    assert summary.token_budget_policy == "fixed"
+    assert replay_budgets == [4, 4]
     rows = (run_dir / "analysis" / "reconstruction_scan_epoch_1" / "reconstruction_replays.jsonl").read_text(encoding="utf-8")
     assert "decoded_correct" in rows
     assert "decoded_convincing" in rows
     assert "faithfulness" in rows
     assert "original_output" in rows
+
+
+def test_run_reconstruction_scan_defaults_to_source_generation_budget(tmp_path: Path, monkeypatch):
+    run_dir = _write_interpolation_run(tmp_path)
+    checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+    replay_budgets: list[int] = []
+
+    monkeypatch.setattr(
+        interpolation,
+        "_load_checkpoint_model",
+        lambda path: (
+            _FakeRAE(),
+            {
+                "normalization_mean": torch.zeros(1, 1, 2),
+                "normalization_std": torch.ones(1, 1, 2),
+            },
+        ),
+    )
+    monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
+    monkeypatch.setattr(
+        interpolation,
+        "greedy_continue_from_loaded_bundle",
+        lambda **kwargs: replay_budgets.append(kwargs["max_new_tokens"]) or "The answer is 1",
+    )
+
+    summary = run_reconstruction_scan(
+        run_dir,
+        checkpoint_path=checkpoint,
+        replay_device_name="cpu",
+        progress_every=0,
+    )
+
+    assert replay_budgets == [4, 4]
+    assert summary.max_new_tokens is None
+    assert summary.max_effective_new_tokens == 4
+    assert summary.token_budget_policy == "source_generated_tokens_or_320"

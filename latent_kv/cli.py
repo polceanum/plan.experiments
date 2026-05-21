@@ -862,7 +862,12 @@ def build_parser() -> argparse.ArgumentParser:
     reconstruction_scan.add_argument("--device", default="cpu", help="Device for RAE latent decoding.")
     reconstruction_scan.add_argument("--replay-device", default="auto", help="Device for local LLM replay.")
     reconstruction_scan.add_argument("--model-id", default=None, help="Local model for replay. Defaults to source record model_id.")
-    reconstruction_scan.add_argument("--max-new-tokens", type=int, default=128)
+    reconstruction_scan.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Replay token budget. Defaults to each source record's generated_tokens, or 320 if unavailable.",
+    )
     reconstruction_scan.add_argument("--limit", type=int, default=None, help="Optional solved-source endpoint limit for smoke scans.")
     reconstruction_scan.add_argument("--progress-every", type=int, default=25, help="Print scan progress every N endpoints; 0 disables progress.")
     reconstruction_scan.set_defaults(func=cmd_latent_reconstruction_scan)
