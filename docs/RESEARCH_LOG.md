@@ -908,3 +908,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use the structured rae_temporal codec for the next real run, starting with solved-only full trajectories and conservative replay KL only after the MSE-only gate reaches much lower error. Treat old single-global-latent trajectory runs as deprecated diagnostics, not evidence about the fixed codec.
+
+## 2026-05-21 - Add token-level prompt decoder path
+
+### Worked
+
+- Added a real task/prompt decoder path rather than a character-level toy: `latent-prompt-decoder-dataset` now exports prompt token IDs from trajectory cache bundles, and `latent-prompt-decoder-train` trains a token-level decoder where learned prompt-position queries attend to structured latent memory. The decoder trains over the compact set of prompt token IDs observed in the dataset and stores the mapping back to original tokenizer IDs.
+- Smoke-tested the path on epoch-570 solved498 structured latents: 498 rows, latent shape `[498, 499, 512]`, compact prompt vocabulary size 2,837 over original Qwen token IDs, one CPU smoke epoch with hidden_dim 64 / one layer completed and wrote model, decoded-token rows, and training history.
+- Updated `docs/KV_RAE_FLOW.md` to distinguish the plan/cache decoder from the task/prompt decoder and to require token-level prompt recovery metrics before using recovered prompts for interpolation interpretation.
+
+### Did Not Work / Caveats
+
+- A first attempt at a character-level prompt decoder was rejected as too toy-like and removed before commit. A direct full-Qwen-vocabulary projection was also too slow for routine CPU checks, so the implemented prompt decoder uses a compact observed-token vocabulary and stores the original-token mapping.
+
+### Left To Do
+
+- Train the prompt decoder for a meaningful number of epochs on a stable RAE checkpoint, then evaluate exact prompt-token recovery and use recovered prompts alongside decoded cache plans for interpolation analysis.

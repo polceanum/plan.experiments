@@ -127,6 +127,20 @@ def test_latent_prompt_decoder_dataset_help_lists_controls(capsys):
     assert "--output-dir" in out
 
 
+def test_latent_prompt_decoder_train_help_lists_controls(capsys):
+    try:
+        main(["latent-prompt-decoder-train", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--dataset" in out
+    assert "--epochs" in out
+    assert "--hidden-dim" in out
+    assert "--max-prompt-tokens" in out
+    assert "--max-latent-chunks" in out
+    assert "--num-layers" in out
+
+
 def test_corruption_sensitivity_help_lists_alpha(capsys):
     try:
         main(["corruption-sensitivity", "--help"])

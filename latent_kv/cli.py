@@ -26,7 +26,7 @@ from .latent_analysis import run_latent_analysis
 from .latent_interpolation import parse_alphas, run_latent_interpolation, run_reconstruction_scan
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
-from .prompt_decoder import export_prompt_decoder_dataset
+from .prompt_decoder import export_prompt_decoder_dataset, train_prompt_decoder
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .replay_diagnostics import score_replay_fidelity
@@ -621,6 +621,25 @@ def cmd_latent_prompt_decoder_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_latent_prompt_decoder_train(args: argparse.Namespace) -> int:
+    summary = train_prompt_decoder(
+        dataset_path=Path(args.dataset),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        max_prompt_tokens=args.max_prompt_tokens,
+        max_latent_chunks=args.max_latent_chunks,
+        device_name=args.device,
+        log_every=args.log_every,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_corruption_sensitivity(args: argparse.Namespace) -> int:
     import json
 
@@ -885,6 +904,24 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_decoder_dataset.add_argument("--analysis-dir", required=True, help="Directory containing checkpoint_latents.pt.")
     prompt_decoder_dataset.add_argument("--output-dir", default=None, help="Output directory. Defaults to <analysis-dir>/prompt_decoder.")
     prompt_decoder_dataset.set_defaults(func=cmd_latent_prompt_decoder_dataset)
+
+    prompt_decoder_train = sub.add_parser(
+        "latent-prompt-decoder-train",
+        help="Train a token-level latent-to-prompt decoder head",
+    )
+    prompt_decoder_train.add_argument("--dataset", required=True, help="prompt_decoder_dataset.pt from latent-prompt-decoder-dataset.")
+    prompt_decoder_train.add_argument("--output-dir", default=None, help="Output directory. Defaults to <dataset-dir>/prompt_decoder_model.")
+    prompt_decoder_train.add_argument("--epochs", type=int, default=200)
+    prompt_decoder_train.add_argument("--batch-size", type=int, default=32)
+    prompt_decoder_train.add_argument("--lr", type=float, default=0.001)
+    prompt_decoder_train.add_argument("--hidden-dim", type=int, default=512)
+    prompt_decoder_train.add_argument("--num-layers", type=int, default=2)
+    prompt_decoder_train.add_argument("--num-heads", type=int, default=8)
+    prompt_decoder_train.add_argument("--max-prompt-tokens", type=int, default=None)
+    prompt_decoder_train.add_argument("--max-latent-chunks", type=int, default=128)
+    prompt_decoder_train.add_argument("--device", default="cpu")
+    prompt_decoder_train.add_argument("--log-every", type=int, default=25)
+    prompt_decoder_train.set_defaults(func=cmd_latent_prompt_decoder_train)
 
     corruption = sub.add_parser(
         "corruption-sensitivity",

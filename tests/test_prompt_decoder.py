@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from latent_kv.prompt_decoder import export_prompt_decoder_dataset
+from latent_kv.prompt_decoder import export_prompt_decoder_dataset, train_prompt_decoder
 from latent_kv.schemas import TrajectoryRecord, append_jsonl, read_json, read_jsonl
 
 
@@ -90,3 +90,45 @@ def test_export_prompt_decoder_dataset_reports_structured_latent_shape(tmp_path:
     assert summary.latent_shape == [1, 2, 5]
     assert saved_summary["latent_dim"] == 5
     assert saved_summary["latent_shape"] == [1, 2, 5]
+
+
+def test_train_prompt_decoder_writes_model_and_decodes_rows(tmp_path: Path):
+    dataset_dir = tmp_path / "prompt_decoder"
+    dataset_dir.mkdir()
+    dataset_path = dataset_dir / "prompt_decoder_dataset.pt"
+    rows = [
+        {"index": 0, "task_id": "a", "prompt": "Solve A.", "prompt_token_ids": [3, 4, 5]},
+        {"index": 1, "task_id": "b", "prompt": "Solve B.", "prompt_token_ids": [3, 4, 6]},
+    ]
+    torch.save(
+        {
+            "latents": torch.tensor([[[1.0, 0.0], [0.5, 0.0]], [[0.0, 1.0], [0.0, 0.5]]]),
+            "rows": rows,
+            "checkpoint_metadata": {"epoch": 1},
+        },
+        dataset_path,
+    )
+
+    summary = train_prompt_decoder(
+        dataset_path,
+        epochs=2,
+        batch_size=2,
+        hidden_dim=16,
+        num_layers=1,
+        num_heads=4,
+        max_prompt_tokens=4,
+        max_latent_chunks=1,
+        log_every=0,
+    )
+
+    output_dir = dataset_dir / "prompt_decoder_model"
+    saved_summary = read_json(output_dir / "prompt_decoder_train_summary.json")
+    decoded = read_jsonl(output_dir / "decoded_prompt_tokens.jsonl")
+    assert summary.rows == 2
+    assert summary.vocab_size == 4
+    assert saved_summary["original_token_vocab_size"] == 7
+    assert saved_summary["max_prompt_tokens"] == 3
+    assert saved_summary["max_latent_chunks"] == 1
+    assert (output_dir / "prompt_token_decoder.pt").exists()
+    assert len(decoded) == 2
+    assert "decoded_prompt_token_ids" in decoded[0]

@@ -373,18 +373,28 @@ problem make sense, and does the generated plan solve that recovered problem?
 
 The first implementation artifact for this path is
 `latent-prompt-decoder-dataset`, which exports latent vectors paired with their
-source problem prompts. A later training step should add an actual
-latent-to-prompt decoder head and report prompt recovery quality before using
-it to judge interpolations.
+source problem prompts and prompt token IDs recovered from the trajectory cache
+bundles. The paired training command is `latent-prompt-decoder-train`, which
+trains a token-level latent-to-prompt decoder head.
+
+This task decoder is intentionally not a character-level toy. It follows the
+same structured-decoder principle as the trajectory RAE: latent chunks are
+projected as a memory sequence, learned prompt-position queries attend to that
+memory, and a token classifier predicts the original prompt token IDs. Prompt
+recovery should be reported with token accuracy and exact prompt-token match
+before decoded prompts are used to interpret interpolation points.
 
 ## Two Decoders
 
 ```text
-RAE decoding:
-  z -> reconstructed KV cache sequence
+Plan/cache decoder:
+  z -> RAE decoder -> reconstructed full-trajectory KV cache sequence
 
-LLM decoding:
-  reconstructed KV cache -> next tokens -> output text
+Task/prompt decoder:
+  z -> token-level prompt decoder -> recovered problem prompt tokens
+
+Local LLM replay:
+  recovered or endpoint prompt context + reconstructed KV cache -> output text
 ```
 
 Keeping those separate is important. The RAE learns a bottlenecked cache-state
