@@ -46,6 +46,16 @@ class PromptDecoderTrainSummary:
     artifacts: dict[str, str]
 
 
+@dataclass(frozen=True)
+class PromptInterpolationDecodeSummary:
+    prompt_decoder_checkpoint: str
+    interpolation_dir: str
+    output_dir: str
+    rows: int
+    checkpoint_epoch: int | None
+    artifacts: dict[str, str]
+
+
 class LatentPromptTokenDecoder(nn.Module):
     """Decode structured latents into prompt token IDs.
 
@@ -215,6 +225,47 @@ def _pool_latent_chunks(latents: torch.Tensor, max_latent_chunks: int | None) ->
     return pooled.contiguous()
 
 
+def _checkpoint_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu() for key, value in model.state_dict().items()}
+
+
+def _save_prompt_token_decoder_checkpoint(
+    path: Path,
+    model: LatentPromptTokenDecoder,
+    *,
+    token_vocab: list[int],
+    latent_dim: int,
+    vocab_size: int,
+    prompt_length: int,
+    hidden_dim: int,
+    num_layers: int,
+    num_heads: int,
+    max_latent_chunks: int | None,
+    checkpoint_metadata: Any,
+    epoch: int,
+    loss: float | None,
+) -> None:
+    torch.save(
+        {
+            "state_dict": _checkpoint_state_dict(model),
+            "config": {
+                "latent_dim": int(latent_dim),
+                "vocab_size": int(vocab_size),
+                "token_id_vocab": token_vocab,
+                "max_prompt_tokens": int(prompt_length),
+                "hidden_dim": int(hidden_dim),
+                "num_layers": int(num_layers),
+                "num_heads": int(num_heads),
+                "max_latent_chunks": int(max_latent_chunks) if max_latent_chunks is not None else None,
+            },
+            "checkpoint_metadata": checkpoint_metadata,
+            "prompt_decoder_epoch": int(epoch),
+            "prompt_decoder_loss": float(loss) if loss is not None else None,
+        },
+        path,
+    )
+
+
 def train_prompt_decoder(
     dataset_path: Path,
     output_dir: Path | None = None,
@@ -229,6 +280,7 @@ def train_prompt_decoder(
     device_name: str = "cpu",
     log_every: int = 25,
     progress_every_batches: int = 25,
+    checkpoint_every: int = 10,
 ) -> PromptDecoderTrainSummary:
     payload = torch.load(dataset_path, map_location="cpu")
     latents = payload["latents"].detach().cpu().float()
@@ -299,6 +351,38 @@ def train_prompt_decoder(
         history.append({"epoch": float(epoch), "loss": mean_loss})
         if log_every > 0 and (epoch == 1 or epoch == int(epochs) or epoch % int(log_every) == 0):
             print(f"[latent-prompt-decoder-train] epoch {epoch}/{epochs} loss={mean_loss:.6g}", flush=True)
+        if checkpoint_every > 0 and (epoch == 1 or epoch == int(epochs) or epoch % int(checkpoint_every) == 0):
+            _save_prompt_token_decoder_checkpoint(
+                output_dir / "prompt_token_decoder_latest.pt",
+                model,
+                token_vocab=token_vocab,
+                latent_dim=int(latents.shape[-1]),
+                vocab_size=vocab_size,
+                prompt_length=prompt_length,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                max_latent_chunks=max_latent_chunks,
+                checkpoint_metadata=payload.get("checkpoint_metadata"),
+                epoch=epoch,
+                loss=mean_loss,
+            )
+            if epoch == 1 or epoch % int(checkpoint_every) == 0:
+                _save_prompt_token_decoder_checkpoint(
+                    output_dir / f"prompt_token_decoder_epoch_{epoch:06d}.pt",
+                    model,
+                    token_vocab=token_vocab,
+                    latent_dim=int(latents.shape[-1]),
+                    vocab_size=vocab_size,
+                    prompt_length=prompt_length,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    num_heads=num_heads,
+                    max_latent_chunks=max_latent_chunks,
+                    checkpoint_metadata=payload.get("checkpoint_metadata"),
+                    epoch=epoch,
+                    loss=mean_loss,
+                )
 
     with torch.no_grad():
         logits = model(latents, prompt_length=prompt_length)
@@ -324,21 +408,20 @@ def train_prompt_decoder(
         )
 
     checkpoint_path = output_dir / "prompt_token_decoder.pt"
-    torch.save(
-        {
-            "state_dict": model.cpu().state_dict(),
-            "config": {
-                "latent_dim": int(latents.shape[-1]),
-                "vocab_size": int(vocab_size),
-                "token_id_vocab": token_vocab,
-                "max_prompt_tokens": prompt_length,
-                "hidden_dim": int(hidden_dim),
-                "num_layers": int(num_layers),
-                "num_heads": int(num_heads),
-            },
-            "checkpoint_metadata": payload.get("checkpoint_metadata"),
-        },
+    _save_prompt_token_decoder_checkpoint(
         checkpoint_path,
+        model,
+        token_vocab=token_vocab,
+        latent_dim=int(latents.shape[-1]),
+        vocab_size=vocab_size,
+        prompt_length=prompt_length,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        max_latent_chunks=max_latent_chunks,
+        checkpoint_metadata=payload.get("checkpoint_metadata"),
+        epoch=int(epochs),
+        loss=float(history[-1]["loss"]) if history else None,
     )
     rows_path = output_dir / "decoded_prompt_tokens.jsonl"
     with rows_path.open("w", encoding="utf-8") as handle:
@@ -369,7 +452,137 @@ def train_prompt_decoder(
             "prompt_token_decoder.pt": str(checkpoint_path),
             "decoded_prompt_tokens.jsonl": str(rows_path),
             "training_history.jsonl": str(history_path),
+            "prompt_token_decoder_latest.pt": str(output_dir / "prompt_token_decoder_latest.pt"),
         },
     )
     write_json(output_dir / "prompt_decoder_train_summary.json", asdict(summary))
     return summary
+
+
+def load_prompt_token_decoder(checkpoint_path: Path, device_name: str = "cpu") -> tuple[LatentPromptTokenDecoder, dict[str, Any]]:
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    config = dict(payload["config"])
+    model = LatentPromptTokenDecoder(
+        latent_dim=int(config["latent_dim"]),
+        vocab_size=int(config["vocab_size"]),
+        max_prompt_tokens=int(config["max_prompt_tokens"]),
+        hidden_dim=int(config["hidden_dim"]),
+        num_layers=int(config["num_layers"]),
+        num_heads=int(config["num_heads"]),
+    )
+    model.load_state_dict(payload["state_dict"])
+    model.to(torch.device(device_name))
+    model.eval()
+    return model, payload
+
+
+def _decode_token_ids(token_ids: list[int], model_id: str | None) -> str | None:
+    if not model_id:
+        return None
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
+    except Exception as exc:  # pragma: no cover - depends on local tokenizer availability
+        return f"<tokenizer decode failed: {exc}>"
+
+
+def decode_interpolation_prompts(
+    prompt_decoder_checkpoint: Path,
+    interpolation_dir: Path,
+    output_dir: Path | None = None,
+    model_id: str | None = None,
+    device_name: str = "cpu",
+) -> PromptInterpolationDecodeSummary:
+    """Decode interpolated latent points into approximate source prompts."""
+
+    model, decoder_payload = load_prompt_token_decoder(prompt_decoder_checkpoint, device_name=device_name)
+    config = dict(decoder_payload["config"])
+    token_vocab = [int(token_id) for token_id in config["token_id_vocab"]]
+    max_latent_chunks = config.get("max_latent_chunks")
+    summary = json.loads((interpolation_dir / "interpolation_summary.json").read_text(encoding="utf-8"))
+    analysis_dir = Path(summary["analysis_dir"])
+    latent_payload = torch.load(analysis_dir / "checkpoint_latents.pt", map_location="cpu")
+    latents = latent_payload["latents"].detach().cpu().float()
+    pairs = read_jsonl(interpolation_dir / "interpolation_pairs.jsonl")
+    alphas = [float(alpha) for alpha in summary.get("alphas", [])]
+    output_dir = output_dir or interpolation_dir / "prompt_decoder"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    model_device = next(model.parameters()).device
+    with torch.no_grad():
+        for pair in pairs:
+            a_index = int(pair["a_index"])
+            b_index = int(pair["b_index"])
+            z_a = latents[a_index]
+            z_b = latents[b_index]
+            for alpha in alphas:
+                z = ((1.0 - alpha) * z_a + alpha * z_b).unsqueeze(0)
+                z = _pool_latent_chunks(z, max_latent_chunks=max_latent_chunks).to(model_device)
+                logits = model(z, prompt_length=int(config["max_prompt_tokens"]))
+                class_ids = torch.argmax(logits, dim=-1).squeeze(0).detach().cpu().tolist()
+                token_ids = [token_vocab[int(class_id)] for class_id in class_ids]
+                rows.append(
+                    {
+                        "pair_id": pair.get("pair_id"),
+                        "pair_type": pair.get("pair_type"),
+                        "alpha": alpha,
+                        "a_task_id": pair.get("a_task_id"),
+                        "b_task_id": pair.get("b_task_id"),
+                        "a_prompt": (pair.get("a") or {}).get("prompt"),
+                        "b_prompt": (pair.get("b") or {}).get("prompt"),
+                        "decoded_prompt_token_ids": token_ids,
+                        "decoded_prompt_text": _decode_token_ids(token_ids, model_id),
+                        "prompt_decoder_checkpoint": str(prompt_decoder_checkpoint),
+                        "prompt_decoder_epoch": decoder_payload.get("prompt_decoder_epoch"),
+                        "prompt_decoder_loss": decoder_payload.get("prompt_decoder_loss"),
+                    }
+                )
+
+    jsonl_path = output_dir / "interpolation_decoded_prompts.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    md_path = output_dir / "interpolation_decoded_prompts.md"
+    lines = [
+        "# Interpolation Prompt Decoder",
+        "",
+        f"- Prompt decoder checkpoint: `{prompt_decoder_checkpoint}`",
+        f"- Prompt decoder epoch: `{decoder_payload.get('prompt_decoder_epoch')}`",
+        f"- Prompt decoder loss: `{decoder_payload.get('prompt_decoder_loss')}`",
+        f"- Rows: {len(rows)}",
+        "",
+    ]
+    for pair in pairs:
+        pair_rows = [row for row in rows if row["pair_id"] == pair.get("pair_id")]
+        lines.extend(
+            [
+                f"## {pair.get('pair_id')} ({pair.get('a_task_id')} -> {pair.get('b_task_id')})",
+                "",
+                "| alpha | decoded prompt |",
+                "| ---: | --- |",
+            ]
+        )
+        for row in pair_rows:
+            text = row.get("decoded_prompt_text") or " ".join(str(token_id) for token_id in row["decoded_prompt_token_ids"][:48])
+            text = text.replace("\n", "<br>").replace("|", "\\|")
+            lines.append(f"| {row['alpha']:.3g} | {text} |")
+        lines.append("")
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+
+    out_summary = PromptInterpolationDecodeSummary(
+        prompt_decoder_checkpoint=str(prompt_decoder_checkpoint),
+        interpolation_dir=str(interpolation_dir),
+        output_dir=str(output_dir),
+        rows=len(rows),
+        checkpoint_epoch=summary.get("checkpoint_epoch"),
+        artifacts={
+            "interpolation_decoded_prompts.jsonl": str(jsonl_path),
+            "interpolation_decoded_prompts.md": str(md_path),
+        },
+    )
+    write_json(output_dir / "interpolation_prompt_decode_summary.json", asdict(out_summary))
+    return out_summary

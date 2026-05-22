@@ -375,7 +375,9 @@ The first implementation artifact for this path is
 `latent-prompt-decoder-dataset`, which exports latent vectors paired with their
 source problem prompts and prompt token IDs recovered from the trajectory cache
 bundles. The paired training command is `latent-prompt-decoder-train`, which
-trains a token-level latent-to-prompt decoder head.
+trains a token-level latent-to-prompt decoder head. Prompt-decoder training now
+writes `prompt_token_decoder_latest.pt` plus numbered checkpoints, so long
+decoder runs can be inspected without waiting for the final epoch.
 
 This task decoder is intentionally not a character-level toy. It follows the
 same structured-decoder principle as the trajectory RAE: latent chunks are
@@ -383,6 +385,12 @@ projected as a memory sequence, learned prompt-position queries attend to that
 memory, and a token classifier predicts the original prompt token IDs. Prompt
 recovery should be reported with token accuracy and exact prompt-token match
 before decoded prompts are used to interpret interpolation points.
+
+Once a prompt-decoder checkpoint exists, `latent-prompt-decode-interpolations`
+can project each stored interpolation alpha back into approximate prompt tokens.
+Those decoded prompts are interpretive artifacts, not ground truth. A low-loss
+prompt decoder should make endpoint prompts recoverable first; only then should
+middle-alpha decoded prompts be read as candidate recovered tasks.
 
 ## Two Decoders
 

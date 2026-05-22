@@ -26,7 +26,7 @@ from .latent_analysis import run_latent_analysis
 from .latent_interpolation import parse_alphas, run_latent_interpolation, run_reconstruction_scan
 from .metrics import evaluate_run
 from .prompt_cache_collection import run_existing_prompt_record_cache_collection, run_prompt_cache_collection
-from .prompt_decoder import export_prompt_decoder_dataset, train_prompt_decoder
+from .prompt_decoder import decode_interpolation_prompts, export_prompt_decoder_dataset, train_prompt_decoder
 from .prompt_baselines import BASELINE_TIERS, resolve_baseline_tier, run_prompt_baseline
 from .react_baseline import run_react_baseline
 from .replay_diagnostics import score_replay_fidelity
@@ -636,6 +636,19 @@ def cmd_latent_prompt_decoder_train(args: argparse.Namespace) -> int:
         device_name=args.device,
         log_every=args.log_every,
         progress_every_batches=args.progress_every_batches,
+        checkpoint_every=args.checkpoint_every,
+    )
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_latent_prompt_decode_interpolations(args: argparse.Namespace) -> int:
+    summary = decode_interpolation_prompts(
+        prompt_decoder_checkpoint=Path(args.prompt_decoder_checkpoint),
+        interpolation_dir=Path(args.interpolation_dir),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        model_id=args.model_id,
+        device_name=args.device,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -923,7 +936,19 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_decoder_train.add_argument("--device", default="cpu")
     prompt_decoder_train.add_argument("--log-every", type=int, default=25)
     prompt_decoder_train.add_argument("--progress-every-batches", type=int, default=25)
+    prompt_decoder_train.add_argument("--checkpoint-every", type=int, default=10)
     prompt_decoder_train.set_defaults(func=cmd_latent_prompt_decoder_train)
+
+    prompt_decode_interpolations = sub.add_parser(
+        "latent-prompt-decode-interpolations",
+        help="Decode interpolation latent points into approximate problem prompts",
+    )
+    prompt_decode_interpolations.add_argument("--prompt-decoder-checkpoint", required=True)
+    prompt_decode_interpolations.add_argument("--interpolation-dir", required=True)
+    prompt_decode_interpolations.add_argument("--output-dir", default=None)
+    prompt_decode_interpolations.add_argument("--model-id", default=None, help="Optional local tokenizer id/path for decoded prompt text.")
+    prompt_decode_interpolations.add_argument("--device", default="cpu")
+    prompt_decode_interpolations.set_defaults(func=cmd_latent_prompt_decode_interpolations)
 
     corruption = sub.add_parser(
         "corruption-sensitivity",

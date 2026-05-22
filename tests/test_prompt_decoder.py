@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from latent_kv.prompt_decoder import export_prompt_decoder_dataset, train_prompt_decoder
+from latent_kv.prompt_decoder import decode_interpolation_prompts, export_prompt_decoder_dataset, train_prompt_decoder
 from latent_kv.schemas import TrajectoryRecord, append_jsonl, read_json, read_jsonl
 
 
@@ -120,6 +120,7 @@ def test_train_prompt_decoder_writes_model_and_decodes_rows(tmp_path: Path):
         max_latent_chunks=1,
         log_every=0,
         progress_every_batches=0,
+        checkpoint_every=1,
     )
 
     output_dir = dataset_dir / "prompt_decoder_model"
@@ -132,5 +133,65 @@ def test_train_prompt_decoder_writes_model_and_decodes_rows(tmp_path: Path):
     assert saved_summary["max_latent_chunks"] == 1
     assert saved_summary["progress_every_batches"] == 0
     assert (output_dir / "prompt_token_decoder.pt").exists()
+    assert (output_dir / "prompt_token_decoder_latest.pt").exists()
+    assert (output_dir / "prompt_token_decoder_epoch_000001.pt").exists()
+    assert (output_dir / "prompt_token_decoder_epoch_000002.pt").exists()
     assert len(decoded) == 2
     assert "decoded_prompt_token_ids" in decoded[0]
+
+
+def test_decode_interpolation_prompts_writes_rows(tmp_path: Path):
+    dataset_dir = tmp_path / "prompt_decoder"
+    dataset_dir.mkdir()
+    dataset_path = dataset_dir / "prompt_decoder_dataset.pt"
+    rows = [
+        {"index": 0, "task_id": "a", "prompt": "Solve A.", "prompt_token_ids": [3, 4, 5]},
+        {"index": 1, "task_id": "b", "prompt": "Solve B.", "prompt_token_ids": [3, 4, 6]},
+    ]
+    torch.save(
+        {
+            "latents": torch.tensor([[[1.0, 0.0], [0.5, 0.0]], [[0.0, 1.0], [0.0, 0.5]]]),
+            "rows": rows,
+            "checkpoint_metadata": {"epoch": 3},
+        },
+        dataset_path,
+    )
+    train_summary = train_prompt_decoder(
+        dataset_path,
+        epochs=1,
+        batch_size=2,
+        hidden_dim=16,
+        num_layers=1,
+        num_heads=4,
+        max_prompt_tokens=4,
+        max_latent_chunks=1,
+        log_every=0,
+        progress_every_batches=0,
+        checkpoint_every=1,
+    )
+
+    run_dir = tmp_path / "run"
+    analysis_dir = run_dir / "analysis_epoch_3"
+    interpolation_dir = analysis_dir / "interpolations"
+    interpolation_dir.mkdir(parents=True)
+    torch.save({"latents": torch.tensor([[[1.0, 0.0], [0.5, 0.0]], [[0.0, 1.0], [0.0, 0.5]]])}, analysis_dir / "checkpoint_latents.pt")
+    (interpolation_dir / "interpolation_summary.json").write_text(
+        '{"analysis_dir": "%s", "alphas": [0, 0.5, 1], "checkpoint_epoch": 3}' % analysis_dir,
+        encoding="utf-8",
+    )
+    (interpolation_dir / "interpolation_pairs.jsonl").write_text(
+        '{"pair_id": "pair_0000", "pair_type": "same_category", "a_index": 0, "b_index": 1, "a_task_id": "a", "b_task_id": "b", "a": {"prompt": "Solve A."}, "b": {"prompt": "Solve B."}}\n',
+        encoding="utf-8",
+    )
+
+    summary = decode_interpolation_prompts(
+        prompt_decoder_checkpoint=Path(train_summary.artifacts["prompt_token_decoder.pt"]),
+        interpolation_dir=interpolation_dir,
+    )
+    decoded = read_jsonl(interpolation_dir / "prompt_decoder" / "interpolation_decoded_prompts.jsonl")
+
+    assert summary.rows == 3
+    assert len(decoded) == 3
+    assert decoded[0]["pair_id"] == "pair_0000"
+    assert "decoded_prompt_token_ids" in decoded[0]
+    assert (interpolation_dir / "prompt_decoder" / "interpolation_decoded_prompts.md").exists()

@@ -924,3 +924,19 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Train the prompt decoder for a meaningful number of epochs on a stable RAE checkpoint, then evaluate exact prompt-token recovery and use recovered prompts alongside decoded cache plans for interpolation analysis.
+
+## 2026-05-22 - Decode interpolation prompts from prompt-decoder checkpoints
+
+### Worked
+
+- Added periodic prompt-decoder checkpoints (`prompt_token_decoder_latest.pt` and numbered epoch snapshots) so long CPU decoder runs become inspectable before the final epoch.
+- Added `latent-prompt-decode-interpolations`, which rebuilds interpolation alpha latents from `checkpoint_latents.pt` and `interpolation_pairs.jsonl`, then decodes each alpha into approximate prompt tokens with a saved token-level prompt decoder.
+- Smoke-ran the command on the epoch-570 interpolation line with the old one-epoch smoke decoder; it wrote 5 decoded-prompt rows and a markdown table, confirming the artifact path works end to end.
+
+### Did Not Work / Caveats
+
+- The one-epoch smoke decoder output is not semantically meaningful. It mostly repeats common prompt tokens, so it should be treated as a plumbing check only. The already-running full prompt decoder was launched before periodic checkpointing existed, so it cannot be used until it finishes or is relaunched with the updated code.
+
+### Left To Do
+
+- Use `prompt_token_decoder_latest.pt` from the next full prompt-decoder run to decode interpolation prompts, then compare endpoint prompt recovery before reading middle-alpha prompts as candidate recovered tasks.
