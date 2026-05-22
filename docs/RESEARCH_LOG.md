@@ -940,3 +940,20 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use `prompt_token_decoder_latest.pt` from the next full prompt-decoder run to decode interpolation prompts, then compare endpoint prompt recovery before reading middle-alpha prompts as candidate recovered tasks.
+
+## 2026-05-22 - Add joint prompt-head and replay-KL objective
+
+### Worked
+
+- Stopped the separate MSE-only structured RAE and standalone prompt-decoder jobs to prepare a single joint run.
+- Added an auxiliary token-level prompt head directly to `rae_temporal` training, controlled by `--prompt-loss-weight` and `--prompt-loss-*` options. The head uses the same structured latent produced by the RAE encoder and optimizes prompt-token CE/KL against source prompt token IDs from cache bundles.
+- The existing frozen local LLM generated-token replay KL remains the plan/cache behavioural objective. When both losses are enabled, the objective is masked temporal KV MSE plus teacher-forced replay KL plus prompt-token CE/KL.
+- RAE checkpoints now include the prompt-head state/config, so later interpolation artifacts can decode both recovered prompts and reconstructed plan/cache trajectories from the same latent points. Full tests passed: 106.
+
+### Did Not Work / Caveats
+
+- This is a new joint objective, so the first MPS launch should be watched for memory pressure. Replay KL is still the expensive part because it routes reconstructed caches through the frozen local LLM.
+
+### Left To Do
+
+- Launch the joint full run conservatively on MPS with replay KL sampled every few batches, then inspect epoch-1/epoch-10 logs for prompt CE, replay KL, and MSE balance before increasing replay steps or weights.

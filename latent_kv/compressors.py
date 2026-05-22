@@ -16,6 +16,7 @@ from torch import nn
 
 from .cache import cache_shapes, cache_to_device, choose_device, flatten_cache, load_cache_bundle, load_model_and_tokenizer
 from .injection import _forward_parameters
+from .prompt_decoder import LatentPromptTokenDecoder
 from .schemas import CompressionResult, read_jsonl, write_json
 
 
@@ -733,6 +734,42 @@ def train_autoencoder(
     return model, mse, history
 
 
+def _prompt_token_targets_for_auxiliary_loss(
+    cache_paths: list[str],
+    max_prompt_tokens: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    prompt_ids: list[list[int]] = []
+    for path in cache_paths:
+        bundle = load_cache_bundle(Path(path))
+        input_ids = bundle.get("input_ids")
+        if input_ids is None:
+            raise ValueError("Prompt auxiliary loss requires input_ids in every cache bundle")
+        generation_config = bundle.get("generation_config") or {}
+        prompt_tokens = generation_config.get("prompt_tokens")
+        flat_ids = [int(token_id) for token_id in input_ids.reshape(-1).tolist()]
+        if prompt_tokens is None:
+            prompt_tokens = len(flat_ids)
+        prompt_ids.append(flat_ids[: int(prompt_tokens)])
+    if not prompt_ids:
+        raise ValueError("Prompt auxiliary loss requires at least one cache bundle")
+    lengths = [min(len(ids), int(max_prompt_tokens) if max_prompt_tokens else len(ids)) for ids in prompt_ids]
+    width = max(lengths) if max_prompt_tokens is None else min(max(lengths), int(max_prompt_tokens))
+    if width < 1:
+        raise ValueError("Prompt auxiliary loss requires at least one prompt token")
+    original_targets = torch.full((len(prompt_ids), width), -100, dtype=torch.long)
+    mask = torch.zeros((len(prompt_ids), width), dtype=torch.bool)
+    for row_idx, ids in enumerate(prompt_ids):
+        clipped = ids[:width]
+        original_targets[row_idx, : len(clipped)] = torch.tensor(clipped, dtype=torch.long)
+        mask[row_idx, : len(clipped)] = True
+    token_vocab = sorted({int(token_id) for token_id in original_targets[mask].tolist()})
+    token_to_class = {token_id: class_id for class_id, token_id in enumerate(token_vocab)}
+    targets = torch.full_like(original_targets, -100)
+    for token_id, class_id in token_to_class.items():
+        targets[original_targets == token_id] = int(class_id)
+    return targets, mask, token_vocab
+
+
 def train_temporal_lstm_autoencoder(
     x: torch.Tensor,
     shapes: list[Any],
@@ -762,6 +799,11 @@ def train_temporal_lstm_autoencoder(
     grad_clip_norm: float = 0.0,
     mps_empty_cache_every_batches: int = 0,
     replay_loss_every_n_batches: int = 1,
+    prompt_loss_weight: float = 0.0,
+    prompt_loss_max_tokens: int | None = None,
+    prompt_loss_hidden_dim: int = 128,
+    prompt_loss_num_layers: int = 2,
+    prompt_loss_num_heads: int = 8,
     temporal_codec_kind: str = "chunked",
     temporal_chunk_size: int = 1,
     checkpoint_stem: str = "rae_temporal",
@@ -770,6 +812,7 @@ def train_temporal_lstm_autoencoder(
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
     replay_loss_weight = float(replay_loss_weight)
+    prompt_loss_weight = float(prompt_loss_weight)
     if llm_loss_weight != 0.0:
         raise ValueError(
             "llm_loss_weight is deprecated because prompt-prefix KL can bias the codec away from "
@@ -871,7 +914,39 @@ def train_temporal_lstm_autoencoder(
                 if training_device.type == "mps":
                     _empty_device_cache(training_device)
         print("[rae_temporal] Teacher-forced replay loss targets loaded.", flush=True)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    prompt_decoder = None
+    prompt_targets = None
+    prompt_target_mask = None
+    prompt_token_vocab: list[int] = []
+    prompt_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    if prompt_loss_weight > 0:
+        print("[rae_temporal] Preparing token-level prompt auxiliary loss...", flush=True)
+        if not cache_paths:
+            raise ValueError("cache_paths are required when prompt auxiliary loss is enabled")
+        prompt_targets_cpu, prompt_mask_cpu, prompt_token_vocab = _prompt_token_targets_for_auxiliary_loss(
+            cache_paths,
+            max_prompt_tokens=prompt_loss_max_tokens,
+        )
+        prompt_targets = prompt_targets_cpu.to(training_device)
+        prompt_target_mask = prompt_mask_cpu.to(training_device)
+        prompt_decoder = LatentPromptTokenDecoder(
+            latent_dim=latent_dim,
+            vocab_size=len(prompt_token_vocab),
+            max_prompt_tokens=int(prompt_targets.shape[1]),
+            hidden_dim=int(prompt_loss_hidden_dim),
+            num_layers=int(prompt_loss_num_layers),
+            num_heads=int(prompt_loss_num_heads),
+        ).to(training_device)
+        print(
+            "[rae_temporal] Prompt auxiliary targets loaded: "
+            f"prompt_tokens={prompt_targets.shape[1]} compact_vocab={len(prompt_token_vocab)} "
+            f"hidden_dim={prompt_loss_hidden_dim} layers={prompt_loss_num_layers} heads={prompt_loss_num_heads}",
+            flush=True,
+        )
+    opt_params = list(model.parameters())
+    if prompt_decoder is not None:
+        opt_params.extend(prompt_decoder.parameters())
+    opt = torch.optim.AdamW(opt_params, lr=lr, weight_decay=weight_decay)
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
     if checkpoint_every > 0 and checkpoint_dir is not None:
@@ -902,6 +977,12 @@ def train_temporal_lstm_autoencoder(
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "replay_loss_every_n_batches": int(replay_loss_every_n_batches),
+        "prompt_loss_weight": prompt_loss_weight,
+        "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
+        "prompt_loss_hidden_dim": int(prompt_loss_hidden_dim),
+        "prompt_loss_num_layers": int(prompt_loss_num_layers),
+        "prompt_loss_num_heads": int(prompt_loss_num_heads),
+        "prompt_loss_compact_vocab": len(prompt_token_vocab),
         "temporal_codec_kind": temporal_codec_kind,
         "temporal_chunk_size": getattr(model, "chunk_size", None),
         "note": "Startup event before first epoch."
@@ -916,6 +997,8 @@ def train_temporal_lstm_autoencoder(
             denominator_total = 0.0
             replay_loss_total = 0.0
             replay_loss_observations = 0
+            prompt_loss_total = 0.0
+            prompt_loss_observations = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
             for batch_index, batch_start in enumerate(range(0, int(normalized.shape[0]), batch_size), start=1):
                 batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
@@ -924,9 +1007,19 @@ def train_temporal_lstm_autoencoder(
                 batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
                 batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
                 opt.zero_grad(set_to_none=True)
-                reconstructed_norm = model(batch_normalized, token_mask=batch_token_mask)
+                z = model.encode(batch_normalized, token_mask=batch_token_mask)
+                reconstructed_norm = model.decode(z)
                 reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
                 replay_loss = reconstructed_norm.new_tensor(0.0)
+                prompt_loss = reconstructed_norm.new_tensor(0.0)
+                if prompt_decoder is not None and prompt_targets is not None:
+                    batch_prompt_targets = prompt_targets[batch_start:batch_stop]
+                    prompt_logits = prompt_decoder(z, prompt_length=int(batch_prompt_targets.shape[1]))
+                    prompt_loss = prompt_loss_fn(
+                        prompt_logits.reshape(-1, len(prompt_token_vocab)),
+                        batch_prompt_targets.reshape(-1),
+                    )
+                    prompt_loss_observations += 1
                 replay_loss_active = (
                     llm is not None
                     and replay_loss_weight > 0
@@ -955,7 +1048,7 @@ def train_temporal_lstm_autoencoder(
                         replay_loss = torch.stack(replay_losses).mean()
                         replay_loss_observations += 1
                     del reconstructed_sequence, replay_losses
-                loss = reconstruction_loss + (replay_loss_weight * replay_loss)
+                loss = reconstruction_loss + (replay_loss_weight * replay_loss) + (prompt_loss_weight * prompt_loss)
                 loss.backward()
                 if grad_clip_norm and grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
@@ -963,6 +1056,7 @@ def train_temporal_lstm_autoencoder(
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
                 replay_loss_total += float(replay_loss.detach().item())
+                prompt_loss_total += float(prompt_loss.detach().item())
                 if (
                     heartbeat_every_batches > 0
                     and (
@@ -974,6 +1068,7 @@ def train_temporal_lstm_autoencoder(
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
                     partial_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
                     partial_effective_replay_loss = replay_loss_total / max(batch_index, 1)
+                    partial_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
                     heartbeat = {
                         "event": "batch_heartbeat",
                         "elapsed_s": time.perf_counter() - start,
@@ -985,14 +1080,19 @@ def train_temporal_lstm_autoencoder(
                         "batch_start": batch_start,
                         "batch_stop": batch_stop,
                         "training_method": "rae_temporal",
-                        "partial_loss": partial_reconstruction_loss + (replay_loss_weight * partial_effective_replay_loss),
+                        "partial_loss": partial_reconstruction_loss
+                        + (replay_loss_weight * partial_effective_replay_loss)
+                        + (prompt_loss_weight * partial_prompt_loss),
                         "partial_loss_components": {
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
                             "teacher_forced_generation_replay_kl": partial_sampled_replay_loss,
                             "teacher_forced_generation_replay_kl_effective": partial_effective_replay_loss,
+                            "prompt_token_reconstruction_ce": partial_prompt_loss,
                         },
                         "replay_loss_every_n_batches": replay_loss_every_n_batches,
                         "replay_loss_observations": replay_loss_observations,
+                        "prompt_loss_weight": prompt_loss_weight,
+                        "prompt_loss_observations": prompt_loss_observations,
                         "memory_gb": _current_memory_gb(),
                     }
                     _append_training_event(progress_path, heartbeat)
@@ -1002,14 +1102,15 @@ def train_temporal_lstm_autoencoder(
                         f"elapsed={heartbeat['elapsed_s']:.1f}s",
                         flush=True,
                     )
-                del batch_normalized, batch_token_mask, batch_feature_mask, reconstructed_norm, reconstruction_loss, replay_loss, loss
+                del batch_normalized, batch_token_mask, batch_feature_mask, z, reconstructed_norm, reconstruction_loss, replay_loss, prompt_loss, loss
                 if mps_empty_cache_every_batches > 0 and batch_index % int(mps_empty_cache_every_batches) == 0:
                     gc.collect()
                     _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
             mean_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
             mean_effective_replay_loss = replay_loss_total / max(total_batches, 1)
-            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_effective_replay_loss)
+            mean_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
+            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_effective_replay_loss) + (prompt_loss_weight * mean_prompt_loss)
             mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
@@ -1023,6 +1124,7 @@ def train_temporal_lstm_autoencoder(
                     "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
                     "teacher_forced_generation_replay_kl": mean_sampled_replay_loss,
                     "teacher_forced_generation_replay_kl_effective": mean_effective_replay_loss,
+                    "prompt_token_reconstruction_ce": mean_prompt_loss,
                 },
                 "method": "rae_temporal",
                 "masked_loss": True,
@@ -1038,6 +1140,14 @@ def train_temporal_lstm_autoencoder(
                 "replay_gradients": llm is not None and replay_loss_weight > 0,
                 "replay_loss_every_n_batches": replay_loss_every_n_batches,
                 "replay_loss_observations": replay_loss_observations,
+                "prompt_loss_weight": prompt_loss_weight,
+                "prompt_loss_observations": prompt_loss_observations,
+                "prompt_decoder_gradients": prompt_decoder is not None and prompt_loss_weight > 0,
+                "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
+                "prompt_loss_hidden_dim": int(prompt_loss_hidden_dim),
+                "prompt_loss_num_layers": int(prompt_loss_num_layers),
+                "prompt_loss_num_heads": int(prompt_loss_num_heads),
+                "prompt_loss_compact_vocab": len(prompt_token_vocab),
                 "grad_clip_norm": float(grad_clip_norm),
                 "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                 "weight_decay": weight_decay,
@@ -1053,6 +1163,7 @@ def train_temporal_lstm_autoencoder(
                     f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
                     f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
                     f"replay_kl={event['loss_components']['teacher_forced_generation_replay_kl']:.6g} "
+                    f"prompt_ce={event['loss_components']['prompt_token_reconstruction_ce']:.6g} "
                     f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s "
                     f"mem={mem_gb:.2f}GB",
                     flush=True,
@@ -1076,12 +1187,31 @@ def train_temporal_lstm_autoencoder(
                     "replay_loss_weight": replay_loss_weight,
                     "replay_loss_steps": int(replay_loss_steps),
                     "replay_loss_every_n_batches": replay_loss_every_n_batches,
+                    "prompt_loss_weight": prompt_loss_weight,
+                    "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
+                    "prompt_loss_hidden_dim": int(prompt_loss_hidden_dim),
+                    "prompt_loss_num_layers": int(prompt_loss_num_layers),
+                    "prompt_loss_num_heads": int(prompt_loss_num_heads),
+                    "prompt_loss_compact_vocab": len(prompt_token_vocab),
                     "grad_clip_norm": float(grad_clip_norm),
                     "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                     "weight_decay": weight_decay,
                     "temporal_codec_kind": temporal_codec_kind,
                     "chunk_size": getattr(model, "chunk_size", None),
                 }
+                if prompt_decoder is not None:
+                    checkpoint["prompt_decoder_state_dict"] = {
+                        key: value.detach().cpu() for key, value in prompt_decoder.state_dict().items()
+                    }
+                    checkpoint["prompt_decoder_config"] = {
+                        "latent_dim": int(latent_dim),
+                        "vocab_size": len(prompt_token_vocab),
+                        "token_id_vocab": prompt_token_vocab,
+                        "max_prompt_tokens": int(prompt_targets.shape[1]) if prompt_targets is not None else 0,
+                        "hidden_dim": int(prompt_loss_hidden_dim),
+                        "num_layers": int(prompt_loss_num_layers),
+                        "num_heads": int(prompt_loss_num_heads),
+                    }
                 checkpoint_path = checkpoint_dir / f"{checkpoint_stem}_epoch_{epoch:06d}.pt"
                 _atomic_torch_save(checkpoint, checkpoint_path)
                 _atomic_torch_save(checkpoint, checkpoint_dir / f"{checkpoint_stem}_latest.pt")
@@ -1134,6 +1264,27 @@ def train_temporal_lstm_autoencoder(
         "teacher_forced_generation_replay_steps": int(replay_loss_steps),
         "teacher_forced_generation_replay_gradients": replay_loss_weight > 0,
         "replay_loss_every_n_batches": replay_loss_every_n_batches,
+        "prompt_token_reconstruction_ce_weight": prompt_loss_weight,
+        "prompt_decoder_gradients": prompt_loss_weight > 0,
+        "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
+        "prompt_loss_hidden_dim": int(prompt_loss_hidden_dim),
+        "prompt_loss_num_layers": int(prompt_loss_num_layers),
+        "prompt_loss_num_heads": int(prompt_loss_num_heads),
+        "prompt_loss_compact_vocab": len(prompt_token_vocab),
+        "prompt_decoder_config": {
+            "latent_dim": int(latent_dim),
+            "vocab_size": len(prompt_token_vocab),
+            "token_id_vocab": prompt_token_vocab,
+            "max_prompt_tokens": int(prompt_targets.shape[1]) if prompt_targets is not None else 0,
+            "hidden_dim": int(prompt_loss_hidden_dim),
+            "num_layers": int(prompt_loss_num_layers),
+            "num_heads": int(prompt_loss_num_heads),
+        }
+        if prompt_decoder is not None
+        else None,
+        "prompt_decoder_state_dict": {key: value.detach().cpu() for key, value in prompt_decoder.state_dict().items()}
+        if prompt_decoder is not None
+        else None,
         "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
         "resume_epoch": resume_epoch,
         "grad_clip_norm": float(grad_clip_norm),
@@ -1194,6 +1345,11 @@ def run_compression(
     grad_clip_norm: float = 0.0,
     mps_empty_cache_every_batches: int = 0,
     replay_loss_every_n_batches: int = 1,
+    prompt_loss_weight: float = 0.0,
+    prompt_loss_max_tokens: int | None = None,
+    prompt_loss_hidden_dim: int = 128,
+    prompt_loss_num_layers: int = 2,
+    prompt_loss_num_heads: int = 8,
     temporal_chunk_size: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
@@ -1276,6 +1432,11 @@ def run_compression(
             grad_clip_norm=grad_clip_norm,
             mps_empty_cache_every_batches=mps_empty_cache_every_batches,
             replay_loss_every_n_batches=replay_loss_every_n_batches,
+            prompt_loss_weight=prompt_loss_weight,
+            prompt_loss_max_tokens=prompt_loss_max_tokens,
+            prompt_loss_hidden_dim=prompt_loss_hidden_dim,
+            prompt_loss_num_layers=prompt_loss_num_layers,
+            prompt_loss_num_heads=prompt_loss_num_heads,
             temporal_codec_kind=temporal_codec_kind,
             temporal_chunk_size=temporal_chunk_size,
             checkpoint_stem=method,

@@ -166,6 +166,8 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--replay-loss-weight" in out
     assert "--replay-loss-steps" in out
     assert "--replay-loss-every-n-batches" in out
+    assert "--prompt-loss-weight" in out
+    assert "--prompt-loss-max-tokens" in out
     assert "rae_temporal" in out
     assert "--weight-decay" in out
     assert "--log-every" in out

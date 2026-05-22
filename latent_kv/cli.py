@@ -219,6 +219,11 @@ def cmd_compress(args: argparse.Namespace) -> int:
         grad_clip_norm=args.grad_clip_norm,
         mps_empty_cache_every_batches=args.mps_empty_cache_every_batches,
         replay_loss_every_n_batches=args.replay_loss_every_n_batches,
+        prompt_loss_weight=args.prompt_loss_weight,
+        prompt_loss_max_tokens=args.prompt_loss_max_tokens,
+        prompt_loss_hidden_dim=args.prompt_loss_hidden_dim,
+        prompt_loss_num_layers=args.prompt_loss_num_layers,
+        prompt_loss_num_heads=args.prompt_loss_num_heads,
         temporal_chunk_size=args.temporal_chunk_size,
     )
     metrics_path = run_dir / "metrics.json"
@@ -742,6 +747,11 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--replay-loss-weight", type=float, default=0.0, help="Weight for teacher-forced generated-token replay KL in rae_temporal training.")
     compress.add_argument("--replay-loss-steps", type=int, default=0, help="Generated reasoning tokens per cache for optional teacher-forced replay KL.")
     compress.add_argument("--replay-loss-every-n-batches", type=int, default=1, help="For rae_temporal, compute replay KL every N mini-batches; skipped batches use reconstruction MSE only.")
+    compress.add_argument("--prompt-loss-weight", type=float, default=0.0, help="Weight for token-level prompt reconstruction CE/KL from the RAE latent.")
+    compress.add_argument("--prompt-loss-max-tokens", type=int, default=None, help="Maximum prompt tokens supervised by the latent prompt head; default uses the full prompt.")
+    compress.add_argument("--prompt-loss-hidden-dim", type=int, default=128, help="Hidden size for the auxiliary latent prompt decoder.")
+    compress.add_argument("--prompt-loss-num-layers", type=int, default=2, help="Transformer decoder layers for the auxiliary latent prompt decoder.")
+    compress.add_argument("--prompt-loss-num-heads", type=int, default=8, help="Attention heads for the auxiliary latent prompt decoder.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
     compress.add_argument(

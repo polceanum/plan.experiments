@@ -497,6 +497,43 @@ def test_temporal_rae_can_use_teacher_forced_generation_replay_gradients(tmp_pat
     assert "frozen_llm_prompt_transition_kl" not in epoch_rows[0]["loss_components"]
 
 
+def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
+    _write_run(tmp_path)
+
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        prompt_loss_weight=0.01,
+        prompt_loss_max_tokens=4,
+        prompt_loss_hidden_dim=16,
+        prompt_loss_num_layers=1,
+        prompt_loss_num_heads=4,
+        log_every=1,
+        checkpoint_every=1,
+    )
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    checkpoint = torch.load(
+        tmp_path / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_latest.pt",
+        map_location="cpu",
+    )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
+
+    assert artifact["prompt_decoder_gradients"] is True
+    assert artifact["prompt_token_reconstruction_ce_weight"] == 0.01
+    assert artifact["prompt_loss_compact_vocab"] == 4
+    assert artifact["prompt_decoder_config"]["max_prompt_tokens"] == 4
+    assert "prompt_decoder_state_dict" in artifact
+    assert checkpoint["prompt_loss_weight"] == 0.01
+    assert "prompt_decoder_state_dict" in checkpoint
+    assert epoch_rows[0]["prompt_decoder_gradients"] is True
+    assert epoch_rows[0]["loss_components"]["prompt_token_reconstruction_ce"] > 0
+
+
 def test_temporal_rae_reports_sampled_replay_kl_observations(tmp_path: Path, monkeypatch):
     _write_run(tmp_path)
     monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)

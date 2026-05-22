@@ -65,6 +65,33 @@ optional and auxiliary; the codec still learns temporal cache reconstruction
 from a structured latent trajectory state. It is not a final-answer correctness
 loss.
 
+The full structured run can also attach the token-level prompt decoder as an
+auxiliary latent head during RAE training. This is controlled by
+`--prompt-loss-weight` and related `--prompt-loss-*` options. The prompt head
+uses cross-entropy over observed source prompt token IDs, which is equivalent to
+a one-hot token KL target. It is separate from the frozen-LLM replay KL:
+
+```text
+plan/cache head:
+  z -> RAE decoder -> reconstructed KV trajectory
+  reconstructed KV + frozen local LLM -> teacher-forced generated-token KL
+
+task/prompt head:
+  z -> token-level prompt decoder -> prompt-token CE/KL
+```
+
+When both are enabled, the training objective is:
+
+```text
+masked temporal KV MSE
+  + replay_loss_weight * generated-token replay KL
+  + prompt_loss_weight * prompt-token CE/KL
+```
+
+The prompt head is checkpointed inside the RAE artifact/checkpoints so later
+interpolation analysis can decode both the candidate prompt and the candidate
+plan/cache state from the same latent point.
+
 ## Full Flow
 
 ```text
