@@ -225,6 +225,8 @@ def cmd_compress(args: argparse.Namespace) -> int:
         prompt_loss_num_layers=args.prompt_loss_num_layers,
         prompt_loss_num_heads=args.prompt_loss_num_heads,
         temporal_chunk_size=args.temporal_chunk_size,
+        temporal_num_heads=args.temporal_num_heads,
+        temporal_latent_tokens=args.temporal_latent_tokens,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -730,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
             "rae_temporal",
             "rae_temporal_mlp",
             "rae_temporal_chunked",
+            "rae_temporal_transformer",
             "retrieval",
         ],
     )
@@ -765,6 +768,8 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--grad-clip-norm", type=float, default=0.0, help="Optional gradient clipping norm for learned codecs; 0 disables clipping.")
     compress.add_argument("--mps-empty-cache-every-batches", type=int, default=0, help="For MPS training, call torch.mps.empty_cache every N mini-batches; 0 disables.")
     compress.add_argument("--temporal-chunk-size", type=int, default=1, help="Token chunk size for the structured temporal RAE codec.")
+    compress.add_argument("--temporal-num-heads", type=int, default=8, help="Attention heads for transformer temporal codecs.")
+    compress.add_argument("--temporal-latent-tokens", type=int, default=1, help="Latent tokens for transformer temporal codecs; 1 preserves a single interpolation point.")
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")

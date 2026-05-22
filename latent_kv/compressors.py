@@ -684,6 +684,104 @@ class TemporalChunkedAutoEncoder(nn.Module):
         return self.decode(self.encode(sequence, token_mask=token_mask))
 
 
+class TemporalTransformerAutoEncoder(nn.Module):
+    """Transformer point-codec for full temporal KV trajectories.
+
+    The default contract is intentionally the same scientific object we want to
+    study: one latent point per full prompt+reasoning trajectory. A small number
+    of latent tokens can be enabled for capacity sweeps, but ``latent_tokens=1``
+    returns a plain ``[batch, latent_dim]`` tensor so PCA and interpolation stay
+    directly comparable with earlier point-codec runs.
+    """
+
+    def __init__(
+        self,
+        token_dim: int,
+        max_tokens: int,
+        latent_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        num_heads: int = 8,
+        latent_tokens: int = 1,
+    ) -> None:
+        super().__init__()
+        self.token_dim = token_dim
+        self.max_tokens = max_tokens
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.latent_tokens = max(1, int(latent_tokens))
+        self.token_to_hidden = nn.Sequential(
+            nn.Linear(token_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.encoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
+        self.encoder_latent_queries = nn.Parameter(torch.randn(self.latent_tokens, hidden_dim) * 0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.to_latent = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        self.latent_to_hidden = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.decoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.output = nn.Linear(hidden_dim, token_dim)
+
+    def encode(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        batch = sequence.shape[0]
+        hidden = self.token_to_hidden(sequence) + self.encoder_positions.unsqueeze(0)
+        latent_queries = self.encoder_latent_queries.unsqueeze(0).expand(batch, self.latent_tokens, self.hidden_dim)
+        encoder_input = torch.cat([latent_queries, hidden], dim=1)
+        padding_mask = None
+        if token_mask is not None:
+            latent_mask = torch.zeros((batch, self.latent_tokens), dtype=torch.bool, device=sequence.device)
+            padding_mask = torch.cat([latent_mask, ~token_mask.to(device=sequence.device, dtype=torch.bool)], dim=1)
+        encoded = self.encoder(encoder_input, src_key_padding_mask=padding_mask)
+        latents = self.to_latent(encoded[:, : self.latent_tokens, :])
+        if self.latent_tokens == 1:
+            return latents[:, 0, :]
+        return latents
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        if z.dim() == 2:
+            z = z.unsqueeze(1)
+        if z.dim() != 3:
+            raise ValueError(f"Expected [batch, latent_dim] or [batch, latent_tokens, latent_dim], got {tuple(z.shape)}")
+        memory = self.latent_to_hidden(z)
+        queries = self.decoder_positions.unsqueeze(0).expand(z.shape[0], self.max_tokens, self.hidden_dim)
+        decoded = self.decoder(tgt=queries, memory=memory)
+        return self.output(decoded)
+
+    def forward(self, sequence: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+        return self.decode(self.encode(sequence, token_mask=token_mask))
+
+
 def _temporal_model_class(codec_kind: str) -> type[nn.Module]:
     kind = codec_kind.lower()
     if kind in {"lstm", "temporal_lstm_rae"}:
@@ -692,7 +790,9 @@ def _temporal_model_class(codec_kind: str) -> type[nn.Module]:
         return TemporalPositionwiseAutoEncoder
     if kind in {"chunked", "temporal_chunked_rae"}:
         return TemporalChunkedAutoEncoder
-    raise ValueError("temporal codec kind must be lstm, positionwise, or chunked")
+    if kind in {"transformer", "temporal_transformer_rae"}:
+        return TemporalTransformerAutoEncoder
+    raise ValueError("temporal codec kind must be lstm, positionwise, chunked, or transformer")
 
 
 def train_autoencoder(
@@ -806,6 +906,8 @@ def train_temporal_lstm_autoencoder(
     prompt_loss_num_heads: int = 8,
     temporal_codec_kind: str = "chunked",
     temporal_chunk_size: int = 1,
+    temporal_num_heads: int = 8,
+    temporal_latent_tokens: int = 1,
     checkpoint_stem: str = "rae_temporal",
 ) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
@@ -845,6 +947,9 @@ def train_temporal_lstm_autoencoder(
     }
     if temporal_codec_kind == "chunked":
         model_kwargs["chunk_size"] = max(1, int(temporal_chunk_size))
+    if temporal_codec_kind == "transformer":
+        model_kwargs["num_heads"] = max(1, int(temporal_num_heads))
+        model_kwargs["latent_tokens"] = max(1, int(temporal_latent_tokens))
     model = model_class(**model_kwargs).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
     resume_epoch = 0
@@ -985,6 +1090,8 @@ def train_temporal_lstm_autoencoder(
         "prompt_loss_compact_vocab": len(prompt_token_vocab),
         "temporal_codec_kind": temporal_codec_kind,
         "temporal_chunk_size": getattr(model, "chunk_size", None),
+        "temporal_num_heads": getattr(model, "num_heads", None),
+        "temporal_latent_tokens": getattr(model, "latent_tokens", None),
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
@@ -1155,6 +1262,8 @@ def train_temporal_lstm_autoencoder(
                 "memory_gb": mem_gb,
                 "temporal_codec_kind": temporal_codec_kind,
                 "temporal_chunk_size": getattr(model, "chunk_size", None),
+                "temporal_num_heads": getattr(model, "num_heads", None),
+                "temporal_latent_tokens": getattr(model, "latent_tokens", None),
             }
             history.append(event)
             if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
@@ -1198,6 +1307,8 @@ def train_temporal_lstm_autoencoder(
                     "weight_decay": weight_decay,
                     "temporal_codec_kind": temporal_codec_kind,
                     "chunk_size": getattr(model, "chunk_size", None),
+                    "temporal_num_heads": getattr(model, "num_heads", None),
+                    "temporal_latent_tokens": getattr(model, "latent_tokens", None),
                 }
                 if prompt_decoder is not None:
                     checkpoint["prompt_decoder_state_dict"] = {
@@ -1293,12 +1404,18 @@ def train_temporal_lstm_autoencoder(
         "train_batch_size": batch_size,
         "decoder_conditioning": "chunk_latents_plus_learned_chunk_and_token_positions"
         if temporal_codec_kind == "chunked"
+        else "latent_transformer_memory_plus_learned_temporal_queries"
+        if temporal_codec_kind == "transformer"
         else "latent_repeated_input_plus_learned_temporal_position",
         "temporal_codec_kind": temporal_codec_kind,
         "chunk_size": getattr(model, "chunk_size", None),
         "num_chunks": getattr(model, "num_chunks", None),
+        "temporal_num_heads": getattr(model, "num_heads", None),
+        "temporal_latent_tokens": getattr(model, "latent_tokens", None),
         "latent_summary": "per_chunk_masked_mean_encoded"
         if temporal_codec_kind == "chunked"
+        else "learned_latent_tokens_from_transformer_encoder"
+        if temporal_codec_kind == "transformer"
         else "last_hidden_plus_masked_mean_encoded",
         "token_projection": "linear_layernorm_gelu",
         "latent_encoding_input": "masked_normalized_temporal_token_cache",
@@ -1351,6 +1468,8 @@ def run_compression(
     prompt_loss_num_layers: int = 2,
     prompt_loss_num_heads: int = 8,
     temporal_chunk_size: int = 1,
+    temporal_num_heads: int = 8,
+    temporal_latent_tokens: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -1369,6 +1488,8 @@ def run_compression(
         "temporal_positionwise",
         "rae_temporal_chunked",
         "temporal_chunked",
+        "rae_temporal_transformer",
+        "temporal_transformer",
     }
     artifact: dict[str, Any] = {"method": method, "latent_dim": latent_dim}
     if method in {"random", "random_projection"}:
@@ -1399,6 +1520,8 @@ def run_compression(
             temporal_codec_kind = "positionwise"
         elif method in {"rae_temporal_chunked", "temporal_chunked"}:
             temporal_codec_kind = "chunked"
+        elif method in {"rae_temporal_transformer", "temporal_transformer"}:
+            temporal_codec_kind = "transformer"
         elif method in {"rae_temporal", "temporal_rae"}:
             temporal_codec_kind = "chunked"
         else:
@@ -1439,6 +1562,8 @@ def run_compression(
             prompt_loss_num_heads=prompt_loss_num_heads,
             temporal_codec_kind=temporal_codec_kind,
             temporal_chunk_size=temporal_chunk_size,
+            temporal_num_heads=temporal_num_heads,
+            temporal_latent_tokens=temporal_latent_tokens,
             checkpoint_stem=method,
         )
         mean = stats.pop("normalization_mean")
@@ -1479,7 +1604,7 @@ def run_compression(
     else:
         raise ValueError(
             "method must be random, pca_svd, autoencoder, rae_temporal, rae_temporal_mlp, "
-            "rae_temporal_chunked, or retrieval"
+            "rae_temporal_chunked, rae_temporal_transformer, or retrieval"
         )
 
     compact_reconstructed = _compact_reconstructions(reconstructed, cache_matrix.shapes, cache_matrix.aligned_shapes)
@@ -1487,6 +1612,13 @@ def run_compression(
     mse = reconstruction_mse(compact_original, compact_reconstructed)
     latent_path = artifact_dir / f"{method}_latents.pt"
     artifact_path = artifact_dir / f"{method}_artifact.pt"
+    structured_temporal_latent = method in temporal_methods and (
+        artifact.get("temporal_codec_kind") == "chunked"
+        or (
+            artifact.get("temporal_codec_kind") == "transformer"
+            and int(artifact.get("temporal_latent_tokens") or 1) > 1
+        )
+    )
     torch.save(
         {
             "latents": z.detach().cpu(),
@@ -1506,10 +1638,8 @@ def run_compression(
                 if method in temporal_methods
                 else "flattened_full_cache",
                 "one_latent_per_cache": True,
-                "structured_latent_per_cache": method in temporal_methods and artifact.get("temporal_codec_kind") == "chunked",
-                "one_global_latent_vector_per_cache": not (
-                    method in temporal_methods and artifact.get("temporal_codec_kind") == "chunked"
-                ),
+                "structured_latent_per_cache": structured_temporal_latent,
+                "one_global_latent_vector_per_cache": not structured_temporal_latent,
                 "decodes_to": "flattened_cache_vector",
             },
             "training_log_path": str(progress_path) if progress_path.exists() else None,

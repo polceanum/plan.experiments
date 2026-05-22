@@ -29,6 +29,27 @@ one latent slot per temporal KV token. PCA and pair selection can flatten that
 structured latent for geometry, but decoding preserves the chunk/token latent
 shape.
 
+The transformer variant restores the one-point hypothesis with a stronger
+sequence model instead of the old global LSTM bottleneck. Use
+`--method rae_temporal_transformer` to encode the whole temporal KV trajectory
+with transformer self-attention into learned latent token(s), then decode the
+full temporal KV trajectory with learned temporal queries. The default
+`--temporal-latent-tokens 1` returns one latent vector per trajectory, so PCA
+and interpolation are literal point operations:
+
+```text
+full prompt+reasoning KV trajectory
+  -> transformer encoder + one learned latent query
+  -> z: [latent_dim]
+  -> transformer decoder over temporal query positions
+  -> reconstructed full KV trajectory
+```
+
+Increasing `--temporal-latent-tokens` to 4 or 8 is a capacity probe, not the
+default scientific contract. Those runs still decode from a compact latent set,
+but interpolation is no longer a single point unless the latent tokens are
+flattened or pooled for analysis.
+
 The RAE decoder reconstructs transformer KV state. It does not directly decode
 an answer string. The local LLM then performs normal autoregressive decoding
 from the reconstructed cache, and the task verifier decides whether that replay
@@ -173,33 +194,34 @@ plan/cache state from the same latent point.
                                |
                                v
                     +---------------------+
-                    | structured encoder  |
-                    | reads token chunks  |
+                    | temporal encoder    |
+                    | chunks or attention |
                     +---------------------+
                                |
                                v
-        per-chunk masked encoded state
+        masked encoded trajectory state
                                |
                                v
                     +---------------------+
-                    | chunk encoder -> z  |
+                    | encoder -> z        |
                     +---------------------+
                                |
                                v
-        structured latent plan state
-        z: [num_chunks, latent_dim]
+        latent plan state
+        z: [latent_dim] for transformer point codec, or
+        z: [num_chunks, latent_dim] for structured chunk codec
         carries source_labels:
         task_id, correct, target, parsed_answer, prompt_protocol
                                |
                                v
                     +---------------------+
-                    | z -> decoder state  |
+                    | z -> decoder memory |
                     | + temporal positions|
                     +---------------------+
                                |
                                v
                     +---------------------+
-                    | LSTM decoder        |
+                    | temporal decoder    |
                     | emits token states  |
                     +---------------------+
                                |
@@ -331,9 +353,9 @@ Problem
   -> original temporal KV-cache sequence
   -> verifier-labelled cache datapoint
   -> align / temporalize / normalize
-  -> structured chunk/token encoder over token time
+  -> temporal encoder over token time
   -> latent plan state z
-  -> chunk/token decoder over token time
+  -> temporal decoder over token time
   -> reconstructed temporal KV-cache sequence
   -> optional frozen-LLM generated-token replay KL gradients during training
   -> LLM continuation from reconstructed cache

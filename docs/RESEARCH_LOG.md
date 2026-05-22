@@ -957,3 +957,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Launch the joint full run conservatively on MPS with replay KL sampled every few batches, then inspect epoch-1/epoch-10 logs for prompt CE, replay KL, and MSE balance before increasing replay steps or weights.
+
+## 2026-05-22 - Add transformer temporal point codec
+
+### Worked
+
+- Implemented rae_temporal_transformer as a transformer encoder/decoder trajectory codec that defaults to one latent point per full temporal KV trajectory, preserving PCA/interpolation semantics while providing a stronger sequence model than the old global LSTM bottleneck. Added checkpoint metadata, CLI flags for transformer heads and latent-token capacity, docs, and tests.
+
+### Did Not Work / Caveats
+
+- This is implementation and smoke coverage only; no full MPS training run has been launched yet, and the active joint LSTM/chunk run remains untouched.
+
+### Left To Do
+
+- Run a small transformer point-codec overfit gate, then launch a solved498 full-trajectory run with --method rae_temporal_transformer --temporal-latent-tokens 1 and compare reconstruction, replay KL, prompt decode, and interpolation quality against the structured chunk codec.

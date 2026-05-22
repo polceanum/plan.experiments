@@ -237,6 +237,12 @@ def _load_checkpoint_model(checkpoint_path: Path) -> tuple[TemporalLSTMAutoEncod
         "temporal_chunked_rae",
     }:
         model_kwargs["chunk_size"] = int(checkpoint.get("chunk_size") or 16)
+    if str(checkpoint.get("temporal_codec_kind") or checkpoint.get("codec_kind") or "").lower() in {
+        "transformer",
+        "temporal_transformer_rae",
+    }:
+        model_kwargs["num_heads"] = int(checkpoint.get("temporal_num_heads") or checkpoint.get("num_heads") or 8)
+        model_kwargs["latent_tokens"] = int(checkpoint.get("temporal_latent_tokens") or checkpoint.get("latent_tokens") or 1)
     model = model_class(**model_kwargs)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()

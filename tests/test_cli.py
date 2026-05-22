@@ -177,6 +177,9 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--resume-checkpoint" in out
     assert "--grad-clip-norm" in out
     assert "--mps-empty-cache-every-batches" in out
+    assert "--temporal-num-heads" in out
+    assert "--temporal-latent-tokens" in out
+    assert "rae_temporal_transformer" in out
 
 
 def test_attach_prompt_caches_help_lists_source_records(capsys):
