@@ -139,6 +139,7 @@ def test_latent_prompt_decoder_train_help_lists_controls(capsys):
     assert "--max-prompt-tokens" in out
     assert "--max-latent-chunks" in out
     assert "--num-layers" in out
+    assert "--progress-every-batches" in out
 
 
 def test_corruption_sensitivity_help_lists_alpha(capsys):

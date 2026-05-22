@@ -119,6 +119,7 @@ def test_train_prompt_decoder_writes_model_and_decodes_rows(tmp_path: Path):
         max_prompt_tokens=4,
         max_latent_chunks=1,
         log_every=0,
+        progress_every_batches=0,
     )
 
     output_dir = dataset_dir / "prompt_decoder_model"
@@ -129,6 +130,7 @@ def test_train_prompt_decoder_writes_model_and_decodes_rows(tmp_path: Path):
     assert saved_summary["original_token_vocab_size"] == 7
     assert saved_summary["max_prompt_tokens"] == 3
     assert saved_summary["max_latent_chunks"] == 1
+    assert saved_summary["progress_every_batches"] == 0
     assert (output_dir / "prompt_token_decoder.pt").exists()
     assert len(decoded) == 2
     assert "decoded_prompt_token_ids" in decoded[0]

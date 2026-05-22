@@ -39,6 +39,7 @@ class PromptDecoderTrainSummary:
     num_heads: int
     max_prompt_tokens: int
     max_latent_chunks: int | None
+    progress_every_batches: int
     final_loss: float
     final_token_accuracy: float
     exact_token_match: float
@@ -227,6 +228,7 @@ def train_prompt_decoder(
     max_latent_chunks: int | None = 128,
     device_name: str = "cpu",
     log_every: int = 25,
+    progress_every_batches: int = 25,
 ) -> PromptDecoderTrainSummary:
     payload = torch.load(dataset_path, map_location="cpu")
     latents = payload["latents"].detach().cpu().float()
@@ -261,11 +263,19 @@ def train_prompt_decoder(
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     history: list[dict[str, float]] = []
     batch_size = max(1, int(batch_size))
+    total_batches = (int(latents.shape[0]) + batch_size - 1) // batch_size
+    print(
+        "[latent-prompt-decoder-train] "
+        f"rows={len(rows)} latent_shape={list(payload['latents'].shape)} "
+        f"pooled_latent_shape={list(latents.shape)} prompt_tokens={prompt_length} "
+        f"compact_vocab={vocab_size} hidden_dim={hidden_dim} layers={num_layers} heads={num_heads}",
+        flush=True,
+    )
     for epoch in range(1, int(epochs) + 1):
         permutation = torch.randperm(int(latents.shape[0]), device=device)
         total_loss = 0.0
         total_tokens = 0
-        for start in range(0, int(latents.shape[0]), batch_size):
+        for batch_index, start in enumerate(range(0, int(latents.shape[0]), batch_size), start=1):
             idx = permutation[start : start + batch_size]
             logits = model(latents[idx], prompt_length=prompt_length)
             loss = loss_fn(logits.reshape(-1, vocab_size), targets[idx].reshape(-1))
@@ -276,6 +286,15 @@ def train_prompt_decoder(
             valid_tokens = int(target_mask[idx].sum().item())
             total_loss += float(loss.item()) * max(1, valid_tokens)
             total_tokens += max(1, valid_tokens)
+            if progress_every_batches > 0 and (
+                batch_index == 1 or batch_index == total_batches or batch_index % int(progress_every_batches) == 0
+            ):
+                partial_loss = total_loss / max(1, total_tokens)
+                print(
+                    f"[latent-prompt-decoder-train epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                    f"partial_loss={partial_loss:.6g}",
+                    flush=True,
+                )
         mean_loss = total_loss / max(1, total_tokens)
         history.append({"epoch": float(epoch), "loss": mean_loss})
         if log_every > 0 and (epoch == 1 or epoch == int(epochs) or epoch % int(log_every) == 0):
@@ -342,6 +361,7 @@ def train_prompt_decoder(
         num_heads=int(num_heads),
         max_prompt_tokens=prompt_length,
         max_latent_chunks=int(max_latent_chunks) if max_latent_chunks is not None else None,
+        progress_every_batches=int(progress_every_batches),
         final_loss=float(history[-1]["loss"]) if history else float("nan"),
         final_token_accuracy=token_accuracy,
         exact_token_match=exact_match,

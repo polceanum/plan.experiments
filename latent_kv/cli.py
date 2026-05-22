@@ -635,6 +635,7 @@ def cmd_latent_prompt_decoder_train(args: argparse.Namespace) -> int:
         max_latent_chunks=args.max_latent_chunks,
         device_name=args.device,
         log_every=args.log_every,
+        progress_every_batches=args.progress_every_batches,
     )
     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
@@ -921,6 +922,7 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_decoder_train.add_argument("--max-latent-chunks", type=int, default=128)
     prompt_decoder_train.add_argument("--device", default="cpu")
     prompt_decoder_train.add_argument("--log-every", type=int, default=25)
+    prompt_decoder_train.add_argument("--progress-every-batches", type=int, default=25)
     prompt_decoder_train.set_defaults(func=cmd_latent_prompt_decoder_train)
 
     corruption = sub.add_parser(
