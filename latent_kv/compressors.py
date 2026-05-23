@@ -888,6 +888,7 @@ def train_temporal_lstm_autoencoder(
     llm_steps: int = 1,
     replay_loss_weight: float = 0.0,
     replay_loss_steps: int = 0,
+    cosine_loss_weight: float = 0.0,
     source_labels: list[dict[str, Any]] | None = None,
     progress_path: Path | None = None,
     log_every: int = 1,
@@ -914,6 +915,7 @@ def train_temporal_lstm_autoencoder(
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
     replay_loss_weight = float(replay_loss_weight)
+    cosine_loss_weight = float(cosine_loss_weight)
     prompt_loss_weight = float(prompt_loss_weight)
     if llm_loss_weight != 0.0:
         raise ValueError(
@@ -1072,6 +1074,7 @@ def train_temporal_lstm_autoencoder(
         "num_layers": num_layers,
         "deprecated_llm_loss_weight": llm_loss_weight,
         "deprecated_llm_steps": llm_steps,
+        "cosine_loss_weight": cosine_loss_weight,
         "replay_loss_weight": replay_loss_weight,
         "replay_loss_steps": replay_loss_steps,
         "log_every": log_every,
@@ -1102,6 +1105,7 @@ def train_temporal_lstm_autoencoder(
             epoch_start = time.perf_counter()
             reconstruction_numerator = 0.0
             denominator_total = 0.0
+            cosine_loss_total = 0.0
             replay_loss_total = 0.0
             replay_loss_observations = 0
             prompt_loss_total = 0.0
@@ -1117,6 +1121,16 @@ def train_temporal_lstm_autoencoder(
                 z = model.encode(batch_normalized, token_mask=batch_token_mask)
                 reconstructed_norm = model.decode(z)
                 reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
+                if cosine_loss_weight > 0:
+                    cosine_per_token = 1.0 - torch.nn.functional.cosine_similarity(
+                        reconstructed_norm.float(),
+                        batch_normalized.float(),
+                        dim=-1,
+                        eps=1e-8,
+                    )
+                    cosine_loss = (cosine_per_token * batch_token_mask.float()).sum() / batch_token_mask.float().sum().clamp_min(1.0)
+                else:
+                    cosine_loss = reconstructed_norm.new_tensor(0.0)
                 replay_loss = reconstructed_norm.new_tensor(0.0)
                 prompt_loss = reconstructed_norm.new_tensor(0.0)
                 if prompt_decoder is not None and prompt_targets is not None:
@@ -1155,13 +1169,19 @@ def train_temporal_lstm_autoencoder(
                         replay_loss = torch.stack(replay_losses).mean()
                         replay_loss_observations += 1
                     del reconstructed_sequence, replay_losses
-                loss = reconstruction_loss + (replay_loss_weight * replay_loss) + (prompt_loss_weight * prompt_loss)
+                loss = (
+                    reconstruction_loss
+                    + (cosine_loss_weight * cosine_loss)
+                    + (replay_loss_weight * replay_loss)
+                    + (prompt_loss_weight * prompt_loss)
+                )
                 loss.backward()
                 if grad_clip_norm and grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                 opt.step()
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
+                cosine_loss_total += float(cosine_loss.detach().item())
                 replay_loss_total += float(replay_loss.detach().item())
                 prompt_loss_total += float(prompt_loss.detach().item())
                 if (
@@ -1173,6 +1193,7 @@ def train_temporal_lstm_autoencoder(
                     )
                 ):
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
+                    partial_cosine_loss = cosine_loss_total / max(batch_index, 1)
                     partial_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
                     partial_effective_replay_loss = replay_loss_total / max(batch_index, 1)
                     partial_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
@@ -1188,14 +1209,17 @@ def train_temporal_lstm_autoencoder(
                         "batch_stop": batch_stop,
                         "training_method": "rae_temporal",
                         "partial_loss": partial_reconstruction_loss
+                        + (cosine_loss_weight * partial_cosine_loss)
                         + (replay_loss_weight * partial_effective_replay_loss)
                         + (prompt_loss_weight * partial_prompt_loss),
                         "partial_loss_components": {
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
+                            "masked_temporal_cosine_distance": partial_cosine_loss,
                             "teacher_forced_generation_replay_kl": partial_sampled_replay_loss,
                             "teacher_forced_generation_replay_kl_effective": partial_effective_replay_loss,
                             "prompt_token_reconstruction_ce": partial_prompt_loss,
                         },
+                        "cosine_loss_weight": cosine_loss_weight,
                         "replay_loss_every_n_batches": replay_loss_every_n_batches,
                         "replay_loss_observations": replay_loss_observations,
                         "prompt_loss_weight": prompt_loss_weight,
@@ -1209,15 +1233,21 @@ def train_temporal_lstm_autoencoder(
                         f"elapsed={heartbeat['elapsed_s']:.1f}s",
                         flush=True,
                     )
-                del batch_normalized, batch_token_mask, batch_feature_mask, z, reconstructed_norm, reconstruction_loss, replay_loss, prompt_loss, loss
+                del batch_normalized, batch_token_mask, batch_feature_mask, z, reconstructed_norm, reconstruction_loss, cosine_loss, replay_loss, prompt_loss, loss
                 if mps_empty_cache_every_batches > 0 and batch_index % int(mps_empty_cache_every_batches) == 0:
                     gc.collect()
                     _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
+            mean_cosine_loss = cosine_loss_total / max(total_batches, 1)
             mean_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
             mean_effective_replay_loss = replay_loss_total / max(total_batches, 1)
             mean_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
-            mean_loss = mean_reconstruction_loss + (replay_loss_weight * mean_effective_replay_loss) + (prompt_loss_weight * mean_prompt_loss)
+            mean_loss = (
+                mean_reconstruction_loss
+                + (cosine_loss_weight * mean_cosine_loss)
+                + (replay_loss_weight * mean_effective_replay_loss)
+                + (prompt_loss_weight * mean_prompt_loss)
+            )
             mem_gb = _current_memory_gb()
             event = {
                 "elapsed_s": time.perf_counter() - start,
@@ -1229,19 +1259,22 @@ def train_temporal_lstm_autoencoder(
                 "loss": mean_loss,
                 "loss_components": {
                     "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
+                    "masked_temporal_cosine_distance": mean_cosine_loss,
                     "teacher_forced_generation_replay_kl": mean_sampled_replay_loss,
                     "teacher_forced_generation_replay_kl_effective": mean_effective_replay_loss,
                     "prompt_token_reconstruction_ce": mean_prompt_loss,
                 },
                 "method": "rae_temporal",
                 "masked_loss": True,
-                "objective": "masked_temporal_reconstruction_mse_plus_optional_teacher_forced_generation_replay_kl",
+                "objective": "masked_temporal_reconstruction_mse_plus_optional_masked_temporal_cosine_distance_plus_optional_teacher_forced_generation_replay_kl",
                 "seq_len": model.max_tokens,
                 "token_dim": model.token_dim,
                 "valid_tokens": int(token_mask.sum().item()),
                 "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
                 "deprecated_llm_loss_weight": llm_loss_weight,
                 "deprecated_llm_steps": int(llm_steps),
+                "cosine_loss_weight": cosine_loss_weight,
+                "cosine_loss_gradients": cosine_loss_weight > 0,
                 "replay_loss_weight": replay_loss_weight,
                 "replay_loss_steps": int(replay_loss_steps),
                 "replay_gradients": llm is not None and replay_loss_weight > 0,
@@ -1271,6 +1304,7 @@ def train_temporal_lstm_autoencoder(
                 print(
                     f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
                     f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
+                    f"cosine={event['loss_components']['masked_temporal_cosine_distance']:.6g} "
                     f"replay_kl={event['loss_components']['teacher_forced_generation_replay_kl']:.6g} "
                     f"prompt_ce={event['loss_components']['prompt_token_reconstruction_ce']:.6g} "
                     f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s "
@@ -1293,6 +1327,7 @@ def train_temporal_lstm_autoencoder(
                     "latest_event": event,
                     "deprecated_llm_loss_weight": llm_loss_weight,
                     "deprecated_llm_steps": int(llm_steps),
+                    "cosine_loss_weight": cosine_loss_weight,
                     "replay_loss_weight": replay_loss_weight,
                     "replay_loss_steps": int(replay_loss_steps),
                     "replay_loss_every_n_batches": replay_loss_every_n_batches,
@@ -1368,7 +1403,9 @@ def train_temporal_lstm_autoencoder(
         "token_dim": model.token_dim,
         "weight_decay": weight_decay,
         "masked_loss": True,
-        "objective": "masked_temporal_reconstruction_mse_plus_optional_teacher_forced_generation_replay_kl",
+        "objective": "masked_temporal_reconstruction_mse_plus_optional_masked_temporal_cosine_distance_plus_optional_teacher_forced_generation_replay_kl",
+        "masked_temporal_cosine_distance_weight": cosine_loss_weight,
+        "masked_temporal_cosine_distance_gradients": cosine_loss_weight > 0,
         "deprecated_llm_loss_weight": llm_loss_weight,
         "deprecated_llm_steps": int(llm_steps),
         "teacher_forced_generation_replay_kl_weight": replay_loss_weight,
@@ -1454,6 +1491,7 @@ def run_compression(
     llm_steps: int = 1,
     replay_loss_weight: float = 0.0,
     replay_loss_steps: int = 0,
+    cosine_loss_weight: float = 0.0,
     log_every: int = 1,
     checkpoint_every: int = 0,
     heartbeat_every_batches: int = 100,
@@ -1544,6 +1582,7 @@ def run_compression(
             llm_steps=llm_steps,
             replay_loss_weight=replay_loss_weight,
             replay_loss_steps=replay_loss_steps,
+            cosine_loss_weight=cosine_loss_weight,
             source_labels=cache_matrix.labels,
             progress_path=progress_path,
             log_every=log_every,
@@ -1662,6 +1701,9 @@ def run_compression(
             "deprecated_frozen_prompt_transition_gradients": 0.0,
             "teacher_forced_generation_replay_gradients": 1.0
             if method in temporal_methods and replay_loss_weight > 0
+            else 0.0,
+            "masked_temporal_cosine_distance_gradients": 1.0
+            if method in temporal_methods and cosine_loss_weight > 0
             else 0.0,
         },
     )

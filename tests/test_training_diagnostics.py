@@ -60,6 +60,7 @@ def test_training_status_renders_human_readable_files(tmp_path):
             "partial_loss": 0.9,
             "partial_loss_components": {
                 "masked_temporal_reconstruction_mse": 0.9,
+                "masked_temporal_cosine_distance": 0.1,
                 "teacher_forced_generation_replay_kl": 0.0,
             },
             "memory_gb": 1.25,
@@ -72,6 +73,7 @@ def test_training_status_renders_human_readable_files(tmp_path):
             "loss": 0.8,
             "loss_components": {
                 "masked_temporal_reconstruction_mse": 0.8,
+                "masked_temporal_cosine_distance": 0.08,
                 "teacher_forced_generation_replay_kl": 0.0,
             },
             "memory_gb": 1.3,
@@ -93,6 +95,7 @@ def test_training_status_renders_human_readable_files(tmp_path):
     readable = (tmp_path / "readable.log").read_text(encoding="utf-8")
     assert "startup device=mps" in readable
     assert "epoch 1/10 batch 2/4 partial_loss=0.9" in readable
+    assert "cosine=0.1" in readable
 
 
 def test_training_status_marks_replay_active_from_heartbeat_components(tmp_path):

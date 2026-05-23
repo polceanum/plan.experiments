@@ -569,6 +569,42 @@ def test_temporal_rae_can_use_teacher_forced_generation_replay_gradients(tmp_pat
     assert "frozen_llm_prompt_transition_kl" not in epoch_rows[0]["loss_components"]
 
 
+def test_temporal_rae_can_use_masked_cosine_reconstruction_gradients(tmp_path: Path):
+    _write_run(tmp_path)
+
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal_transformer",
+        latent_dim=4,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        num_layers=1,
+        cosine_loss_weight=0.25,
+        temporal_num_heads=2,
+        temporal_latent_tokens=1,
+        log_every=1,
+        checkpoint_every=1,
+    )
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+    checkpoint = torch.load(
+        tmp_path / "compressions" / "rae_temporal_transformer_checkpoints" / "rae_temporal_transformer_latest.pt",
+        map_location="cpu",
+    )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_transformer_training.jsonl")
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
+
+    assert artifact["masked_temporal_cosine_distance_weight"] == 0.25
+    assert artifact["masked_temporal_cosine_distance_gradients"] is True
+    assert checkpoint["cosine_loss_weight"] == 0.25
+    assert epoch_rows[0]["cosine_loss_gradients"] is True
+    assert epoch_rows[0]["loss_components"]["masked_temporal_cosine_distance"] >= 0
+    assert epoch_rows[0]["loss"] == pytest.approx(
+        epoch_rows[0]["loss_components"]["masked_temporal_reconstruction_mse"]
+        + 0.25 * epoch_rows[0]["loss_components"]["masked_temporal_cosine_distance"]
+    )
+
+
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
     _write_run(tmp_path)
 

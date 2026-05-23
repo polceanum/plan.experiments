@@ -176,6 +176,7 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             f"batch {row.get('batch')}/{row.get('batches')} "
             f"partial_loss={_format_float(row.get('partial_loss'))} "
             f"mse={_format_float((row.get('partial_loss_components') or {}).get('masked_temporal_reconstruction_mse'))} "
+            f"cosine={_format_float((row.get('partial_loss_components') or {}).get('masked_temporal_cosine_distance'))} "
             f"replay_kl={_format_float((row.get('partial_loss_components') or {}).get('teacher_forced_generation_replay_kl'))} "
             f"memory_gb={_format_float(row.get('memory_gb'))} "
             f"elapsed_s={_format_float(row.get('elapsed_s'))}"
@@ -186,6 +187,7 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             f"epoch {row.get('epoch')}/{row.get('epochs')} done "
             f"loss={_format_float(row.get('loss'))} "
             f"mse={_format_float(components.get('masked_temporal_reconstruction_mse'))} "
+            f"cosine={_format_float(components.get('masked_temporal_cosine_distance'))} "
             f"replay_kl={_format_float(components.get('teacher_forced_generation_replay_kl'))} "
             f"memory_gb={_format_float(row.get('memory_gb'))} "
             f"elapsed_s={_format_float(row.get('elapsed_s'))}"
@@ -246,8 +248,12 @@ def render_training_status(
             ]
         )
         for row in recent_completed:
+            row_components = row.get("loss_components") or {}
             lines.append(
                 f"- epoch `{row.get('epoch')}`: loss `{_format_float(row.get('loss'))}`, "
+                f"mse `{_format_float(row_components.get('masked_temporal_reconstruction_mse'))}`, "
+                f"cosine `{_format_float(row_components.get('masked_temporal_cosine_distance'))}`, "
+                f"replay_kl `{_format_float(row_components.get('teacher_forced_generation_replay_kl'))}`, "
                 f"memory `{_format_float(row.get('memory_gb'))}` GB"
             )
 

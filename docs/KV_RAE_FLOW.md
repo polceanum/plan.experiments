@@ -86,6 +86,13 @@ optional and auxiliary; the codec still learns temporal cache reconstruction
 from a structured latent trajectory state. It is not a final-answer correctness
 loss.
 
+The reconstruction objective can combine two KV-native terms. Masked temporal
+MSE is still the anchor because it preserves absolute KV scale and offset.
+Masked temporal cosine distance can be added with `--cosine-loss-weight` to
+penalize directional drift in each decoded token-state vector. Cosine should be
+treated as a complement, not a replacement: direction-only matching is too weak
+for cache replay because attention logits also depend on KV magnitudes.
+
 The full structured run can also attach the token-level prompt decoder as an
 auxiliary latent head during RAE training. This is controlled by
 `--prompt-loss-weight` and related `--prompt-loss-*` options. The prompt head
@@ -105,6 +112,7 @@ When both are enabled, the training objective is:
 
 ```text
 masked temporal KV MSE
+  + cosine_loss_weight * masked temporal KV cosine distance
   + replay_loss_weight * generated-token replay KL
   + prompt_loss_weight * prompt-token CE/KL
 ```

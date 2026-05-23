@@ -211,6 +211,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         llm_steps=args.llm_steps,
         replay_loss_weight=args.replay_loss_weight,
         replay_loss_steps=args.replay_loss_steps,
+        cosine_loss_weight=args.cosine_loss_weight,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
         heartbeat_every_batches=args.heartbeat_every_batches,
@@ -750,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--replay-loss-weight", type=float, default=0.0, help="Weight for teacher-forced generated-token replay KL in rae_temporal training.")
     compress.add_argument("--replay-loss-steps", type=int, default=0, help="Generated reasoning tokens per cache for optional teacher-forced replay KL.")
     compress.add_argument("--replay-loss-every-n-batches", type=int, default=1, help="For rae_temporal, compute replay KL every N mini-batches; skipped batches use reconstruction MSE only.")
+    compress.add_argument("--cosine-loss-weight", type=float, default=0.0, help="Weight for masked temporal KV cosine-distance reconstruction loss.")
     compress.add_argument("--prompt-loss-weight", type=float, default=0.0, help="Weight for token-level prompt reconstruction CE/KL from the RAE latent.")
     compress.add_argument("--prompt-loss-max-tokens", type=int, default=None, help="Maximum prompt tokens supervised by the latent prompt head; default uses the full prompt.")
     compress.add_argument("--prompt-loss-hidden-dim", type=int, default=128, help="Hidden size for the auxiliary latent prompt decoder.")

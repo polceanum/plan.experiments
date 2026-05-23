@@ -971,3 +971,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run a small transformer point-codec overfit gate, then launch a solved498 full-trajectory run with --method rae_temporal_transformer --temporal-latent-tokens 1 and compare reconstruction, replay KL, prompt decode, and interpolation quality against the structured chunk codec.
+
+## 2026-05-23 - Add hybrid KV cosine reconstruction loss
+
+### Worked
+
+- Added --cosine-loss-weight for temporal RAE training so normalized masked MSE can be complemented by masked temporal KV cosine distance; telemetry, readable status logs, checkpoints, artifacts, CLI help, and tests now report the cosine component separately from replay KL and prompt CE.
+
+### Did Not Work / Caveats
+
+- Cosine is not a replacement for MSE because direction-only matching cannot preserve cache scale; the real run still needs checkpoint analysis before treating interpolation quality as meaningful.
+
+### Left To Do
+
+- Relaunch the transformer point-codec run with MSE plus cosine plus sampled teacher-forced replay KL and prompt CE, then analyze early checkpoints for reconstruction faithfulness and latent interpolation quality.
