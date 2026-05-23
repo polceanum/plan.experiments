@@ -379,6 +379,28 @@ def test_temporal_transformer_autoencoder_maps_token_sequence_to_one_point():
     assert decoded.shape == x.shape
 
 
+def test_temporal_transformer_one_point_can_expand_decoder_memory():
+    model = TemporalTransformerAutoEncoder(
+        token_dim=4,
+        max_tokens=5,
+        latent_dim=3,
+        hidden_dim=8,
+        num_layers=1,
+        num_heads=2,
+        latent_tokens=1,
+        decoder_memory_tokens=4,
+    )
+    x = torch.randn(2, 5, 4)
+    mask = torch.tensor([[True, True, True, True, True], [True, True, True, False, False]])
+
+    z = model.encode(x, token_mask=mask)
+    decoded = model.decode(z)
+
+    assert z.shape == (2, 3)
+    assert decoded.shape == x.shape
+    assert model.decoder_memory_tokens == 4
+
+
 def test_temporal_transformer_autoencoder_can_use_multiple_latent_tokens():
     model = TemporalTransformerAutoEncoder(
         token_dim=4,
@@ -455,6 +477,7 @@ def test_temporal_transformer_compression_preserves_point_codec_contract(tmp_pat
         log_every=1,
         temporal_num_heads=2,
         temporal_latent_tokens=1,
+        temporal_decoder_memory_tokens=3,
     )
     validation = validate_reconstructed_artifact(tmp_path, "rae_temporal_transformer")
     payload = torch.load(result.latent_path, map_location="cpu")
@@ -470,6 +493,7 @@ def test_temporal_transformer_compression_preserves_point_codec_contract(tmp_pat
     assert artifact["temporal_codec_kind"] == "transformer"
     assert artifact["temporal_num_heads"] == 2
     assert artifact["temporal_latent_tokens"] == 1
+    assert artifact["temporal_decoder_memory_tokens"] == 3
 
 
 def test_temporal_mlp_rae_compression_writes_codec_kind(tmp_path: Path):

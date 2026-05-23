@@ -703,6 +703,7 @@ class TemporalTransformerAutoEncoder(nn.Module):
         num_layers: int = 2,
         num_heads: int = 8,
         latent_tokens: int = 1,
+        decoder_memory_tokens: int = 1,
     ) -> None:
         super().__init__()
         self.token_dim = token_dim
@@ -712,6 +713,7 @@ class TemporalTransformerAutoEncoder(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.latent_tokens = max(1, int(latent_tokens))
+        self.decoder_memory_tokens = max(1, int(decoder_memory_tokens))
         self.token_to_hidden = nn.Sequential(
             nn.Linear(token_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -740,6 +742,20 @@ class TemporalTransformerAutoEncoder(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        if self.decoder_memory_tokens > 1:
+            self.decoder_memory_queries = nn.Parameter(torch.randn(self.decoder_memory_tokens, hidden_dim) * 0.02)
+            self.decoder_memory_attention = nn.MultiheadAttention(
+                hidden_dim,
+                num_heads,
+                dropout=0.0,
+                batch_first=True,
+            )
+            self.decoder_memory_mlp = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
         self.decoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
@@ -773,7 +789,18 @@ class TemporalTransformerAutoEncoder(nn.Module):
             z = z.unsqueeze(1)
         if z.dim() != 3:
             raise ValueError(f"Expected [batch, latent_dim] or [batch, latent_tokens, latent_dim], got {tuple(z.shape)}")
-        memory = self.latent_to_hidden(z)
+        latent_memory = self.latent_to_hidden(z)
+        if self.decoder_memory_tokens > 1:
+            queries = self.decoder_memory_queries.unsqueeze(0).expand(z.shape[0], -1, -1)
+            attended, _ = self.decoder_memory_attention(
+                queries,
+                latent_memory,
+                latent_memory,
+                need_weights=False,
+            )
+            memory = self.decoder_memory_mlp(attended + queries)
+        else:
+            memory = latent_memory
         queries = self.decoder_positions.unsqueeze(0).expand(z.shape[0], self.max_tokens, self.hidden_dim)
         decoded = self.decoder(tgt=queries, memory=memory)
         return self.output(decoded)
@@ -909,6 +936,7 @@ def train_temporal_lstm_autoencoder(
     temporal_chunk_size: int = 1,
     temporal_num_heads: int = 8,
     temporal_latent_tokens: int = 1,
+    temporal_decoder_memory_tokens: int = 1,
     checkpoint_stem: str = "rae_temporal",
 ) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     setup_start = time.perf_counter()
@@ -936,6 +964,7 @@ def train_temporal_lstm_autoencoder(
             "hidden_dim": hidden_dim,
             "num_layers": num_layers,
             "temporal_codec_kind": temporal_codec_kind,
+            "temporal_decoder_memory_tokens": int(temporal_decoder_memory_tokens),
             "cosine_loss_weight": cosine_loss_weight,
             "replay_loss_weight": replay_loss_weight,
             "replay_loss_steps": int(replay_loss_steps),
@@ -990,6 +1019,7 @@ def train_temporal_lstm_autoencoder(
     if temporal_codec_kind == "transformer":
         model_kwargs["num_heads"] = max(1, int(temporal_num_heads))
         model_kwargs["latent_tokens"] = max(1, int(temporal_latent_tokens))
+        model_kwargs["decoder_memory_tokens"] = max(1, int(temporal_decoder_memory_tokens))
     model = model_class(**model_kwargs).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
     _append_training_event(
@@ -1001,6 +1031,7 @@ def train_temporal_lstm_autoencoder(
             "temporal_chunk_size": getattr(model, "chunk_size", None),
             "temporal_num_heads": getattr(model, "num_heads", None),
             "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+            "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
             "memory_gb": _current_memory_gb(),
         },
     )
@@ -1197,6 +1228,7 @@ def train_temporal_lstm_autoencoder(
         "temporal_chunk_size": getattr(model, "chunk_size", None),
         "temporal_num_heads": getattr(model, "num_heads", None),
         "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+        "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
@@ -1279,7 +1311,7 @@ def train_temporal_lstm_autoencoder(
                 )
                 loss.backward()
                 if grad_clip_norm and grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                    torch.nn.utils.clip_grad_norm_(opt_params, float(grad_clip_norm))
                 opt.step()
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
@@ -1399,6 +1431,7 @@ def train_temporal_lstm_autoencoder(
                 "temporal_chunk_size": getattr(model, "chunk_size", None),
                 "temporal_num_heads": getattr(model, "num_heads", None),
                 "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+                "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
             }
             history.append(event)
             if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
@@ -1446,6 +1479,7 @@ def train_temporal_lstm_autoencoder(
                     "chunk_size": getattr(model, "chunk_size", None),
                     "temporal_num_heads": getattr(model, "num_heads", None),
                     "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+                    "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
                 }
                 if prompt_decoder is not None:
                     checkpoint["prompt_decoder_state_dict"] = {
@@ -1551,6 +1585,7 @@ def train_temporal_lstm_autoencoder(
         "num_chunks": getattr(model, "num_chunks", None),
         "temporal_num_heads": getattr(model, "num_heads", None),
         "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+        "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
         "latent_summary": "per_chunk_masked_mean_encoded"
         if temporal_codec_kind == "chunked"
         else "learned_latent_tokens_from_transformer_encoder"
@@ -1610,6 +1645,7 @@ def run_compression(
     temporal_chunk_size: int = 1,
     temporal_num_heads: int = 8,
     temporal_latent_tokens: int = 1,
+    temporal_decoder_memory_tokens: int = 1,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -1705,6 +1741,7 @@ def run_compression(
             temporal_chunk_size=temporal_chunk_size,
             temporal_num_heads=temporal_num_heads,
             temporal_latent_tokens=temporal_latent_tokens,
+            temporal_decoder_memory_tokens=temporal_decoder_memory_tokens,
             checkpoint_stem=method,
         )
         mean = stats.pop("normalization_mean")

@@ -1013,3 +1013,18 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Use explicit small --max-new-tokens values for smoke replay scans during active training, and reserve full-budget reconstruction/interpolation sweeps for quieter windows.
+
+## 2026-05-23 - Increase transformer point decoder capacity
+
+### Worked
+
+- Stopped the stalled 512-d one-memory-token transformer point run and added `--temporal-decoder-memory-tokens`, a decoder-side capacity knob that expands one saved/interpolatable latent point into multiple learned internal memory tokens before temporal KV reconstruction. This keeps the point-codec contract intact while giving the decoder more bandwidth.
+- Updated checkpoint/artifact/readable-log metadata and tests to report the decoder memory token count. Gradient clipping now covers both the temporal codec and the auxiliary prompt decoder parameters.
+
+### Did Not Work / Caveats
+
+- The previous transformer point run was not directly comparable to the structured chunk run: it used one 512-d point for the full `499 x 6144` trajectory, while the structured run used one latent slot per time position. Its slow reconstruction progress looked like under-capacity rather than a cache decode plumbing bug.
+
+### Left To Do
+
+- Relaunch the full solved498 transformer point run with one latent point, a larger latent dimension, and multiple decoder memory tokens; inspect early MSE/cosine/replay/prompt losses before committing to a long sweep.

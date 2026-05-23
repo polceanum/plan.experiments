@@ -180,6 +180,7 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--mps-empty-cache-every-batches" in out
     assert "--temporal-num-heads" in out
     assert "--temporal-latent-tokens" in out
+    assert "--temporal-decoder-memory-tokens" in out
     assert "rae_temporal_transformer" in out
 
 

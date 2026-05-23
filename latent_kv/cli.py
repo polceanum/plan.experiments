@@ -228,6 +228,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         temporal_chunk_size=args.temporal_chunk_size,
         temporal_num_heads=args.temporal_num_heads,
         temporal_latent_tokens=args.temporal_latent_tokens,
+        temporal_decoder_memory_tokens=args.temporal_decoder_memory_tokens,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -772,6 +773,12 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--temporal-chunk-size", type=int, default=1, help="Token chunk size for the structured temporal RAE codec.")
     compress.add_argument("--temporal-num-heads", type=int, default=8, help="Attention heads for transformer temporal codecs.")
     compress.add_argument("--temporal-latent-tokens", type=int, default=1, help="Latent tokens for transformer temporal codecs; 1 preserves a single interpolation point.")
+    compress.add_argument(
+        "--temporal-decoder-memory-tokens",
+        type=int,
+        default=1,
+        help="Internal decoder memory tokens expanded from transformer latents; values >1 add decoder bandwidth while keeping one saved point when --temporal-latent-tokens=1.",
+    )
     compress.set_defaults(func=cmd_compress)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")

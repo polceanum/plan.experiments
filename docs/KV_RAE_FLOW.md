@@ -41,9 +41,18 @@ and interpolation are literal point operations:
 full prompt+reasoning KV trajectory
   -> transformer encoder + one learned latent query
   -> z: [latent_dim]
+  -> optional learned expansion to decoder memory tokens
   -> transformer decoder over temporal query positions
   -> reconstructed full KV trajectory
 ```
+
+`--temporal-decoder-memory-tokens` increases decoder bandwidth without changing
+the saved latent geometry. With `--temporal-latent-tokens 1` and
+`--temporal-decoder-memory-tokens 8`, the encoder still emits one
+interpolatable point `z`; the decoder first expands that point into 8 learned
+internal memory tokens, then reconstructs the temporal KV sequence from those
+memory tokens. This is the preferred capacity knob when the one-point run is
+learning but reconstructing generic or weak task-specific plans.
 
 Increasing `--temporal-latent-tokens` to 4 or 8 is a capacity probe, not the
 default scientific contract. Those runs still decode from a compact latent set,

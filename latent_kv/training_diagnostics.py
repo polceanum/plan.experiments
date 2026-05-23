@@ -176,6 +176,8 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             bits.append(f"cosine_weight={row.get('cosine_loss_weight')}")
         if row.get("replay_loss_weight") is not None:
             bits.append(f"replay_weight={row.get('replay_loss_weight')}")
+        if row.get("temporal_decoder_memory_tokens") is not None:
+            bits.append(f"decoder_memory_tokens={row.get('temporal_decoder_memory_tokens')}")
         if row.get("memory_gb") is not None:
             bits.append(f"memory_gb={_format_float(row.get('memory_gb'))}")
         bits.append(f"elapsed_s={_format_float(row.get('elapsed_s'))}")
@@ -185,6 +187,7 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
         return (
             f"startup device={row.get('device')} epochs={row.get('epochs')} "
             f"shape={shape} latent_dim={row.get('latent_dim')} hidden_dim={row.get('hidden_dim')} "
+            f"decoder_memory_tokens={row.get('temporal_decoder_memory_tokens')} "
             f"replay_weight={row.get('replay_loss_weight')} replay_steps={row.get('replay_loss_steps')}"
         )
     if row.get("event") == "batch_heartbeat":
