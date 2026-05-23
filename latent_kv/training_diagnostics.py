@@ -163,6 +163,23 @@ def _row_loss(row: dict[str, Any]) -> float | None:
 
 
 def _human_log_line(row: dict[str, Any]) -> str | None:
+    event = row.get("event")
+    if isinstance(event, str) and event.startswith("setup_"):
+        bits = [event]
+        if row.get("loaded") is not None and row.get("total") is not None:
+            bits.append(f"loaded={row.get('loaded')}/{row.get('total')}")
+        if row.get("temporal_matrix_shape") is not None:
+            bits.append(f"shape={row.get('temporal_matrix_shape')}")
+        if row.get("device") is not None:
+            bits.append(f"device={row.get('device')}")
+        if row.get("cosine_loss_weight") is not None:
+            bits.append(f"cosine_weight={row.get('cosine_loss_weight')}")
+        if row.get("replay_loss_weight") is not None:
+            bits.append(f"replay_weight={row.get('replay_loss_weight')}")
+        if row.get("memory_gb") is not None:
+            bits.append(f"memory_gb={_format_float(row.get('memory_gb'))}")
+        bits.append(f"elapsed_s={_format_float(row.get('elapsed_s'))}")
+        return " ".join(bits)
     if row.get("event") == "startup":
         shape = row.get("temporal_matrix_shape")
         return (

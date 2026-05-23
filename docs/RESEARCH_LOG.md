@@ -985,3 +985,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Relaunch the transformer point-codec run with MSE plus cosine plus sampled teacher-forced replay KL and prompt CE, then analyze early checkpoints for reconstruction faithfulness and latent interpolation quality.
+
+## 2026-05-23 - Add setup-stage training telemetry
+
+### Worked
+
+- Added setup_start, temporal-matrix, normalization, model-construction, replay-target progress, and prompt-target setup events to temporal RAE JSONL logs so long runs are inspectable before epoch 1 starts. Readable training-status output now renders setup rows too.
+
+### Did Not Work / Caveats
+
+- The first hybrid restart showed that stdout alone is still too sparse during expensive setup; JSONL setup rows are the reliable path.
+
+### Left To Do
+
+- Restart the transformer point-codec run from scratch and confirm setup events plus cosine loss appear in the logs before allowing the run to continue.

@@ -911,6 +911,7 @@ def train_temporal_lstm_autoencoder(
     temporal_latent_tokens: int = 1,
     checkpoint_stem: str = "rae_temporal",
 ) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
+    setup_start = time.perf_counter()
     print("[rae_temporal] Starting training: seeding, preparing data...", flush=True)
     torch.manual_seed(seed)
     llm_loss_weight = float(llm_loss_weight)
@@ -924,8 +925,35 @@ def train_temporal_lstm_autoencoder(
         )
     training_device = choose_device(llm_device_name)
     print(f"[rae_temporal] Device selected: {training_device}", flush=True)
+    _append_training_event(
+        progress_path,
+        {
+            "event": "setup_start",
+            "elapsed_s": time.perf_counter() - setup_start,
+            "device": str(training_device),
+            "epochs": epochs,
+            "latent_dim": latent_dim,
+            "hidden_dim": hidden_dim,
+            "num_layers": num_layers,
+            "temporal_codec_kind": temporal_codec_kind,
+            "cosine_loss_weight": cosine_loss_weight,
+            "replay_loss_weight": replay_loss_weight,
+            "replay_loss_steps": int(replay_loss_steps),
+            "prompt_loss_weight": prompt_loss_weight,
+            "memory_gb": _current_memory_gb(),
+        },
+    )
     sequence = _temporal_matrix(x, aligned_shapes)
     print(f"[rae_temporal] Temporal matrix shape: {sequence.shape}", flush=True)
+    _append_training_event(
+        progress_path,
+        {
+            "event": "setup_temporal_matrix",
+            "elapsed_s": time.perf_counter() - setup_start,
+            "temporal_matrix_shape": list(sequence.shape),
+            "memory_gb": _current_memory_gb(),
+        },
+    )
     token_mask = _temporal_token_mask(shapes, aligned_shapes)
     feature_mask = token_mask.unsqueeze(-1).float()
     denominator = (feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
@@ -936,6 +964,16 @@ def train_temporal_lstm_autoencoder(
     std = variance.sqrt().clamp_min(1e-6)
     normalized = ((sequence - mean) / std) * feature_mask
     print(f"[rae_temporal] Normalization complete. mean shape: {mean.shape}, std shape: {std.shape}", flush=True)
+    _append_training_event(
+        progress_path,
+        {
+            "event": "setup_normalization_complete",
+            "elapsed_s": time.perf_counter() - setup_start,
+            "valid_tokens": int(token_mask.sum().item()),
+            "valid_values": int(feature_mask.sum().item() * sequence.shape[-1]),
+            "memory_gb": _current_memory_gb(),
+        },
+    )
     mean_device = mean.to(training_device)
     std_device = std.to(training_device)
     model_class = _temporal_model_class(temporal_codec_kind)
@@ -954,6 +992,18 @@ def train_temporal_lstm_autoencoder(
         model_kwargs["latent_tokens"] = max(1, int(temporal_latent_tokens))
     model = model_class(**model_kwargs).to(training_device)
     print("[rae_temporal] Model constructed.", flush=True)
+    _append_training_event(
+        progress_path,
+        {
+            "event": "setup_model_constructed",
+            "elapsed_s": time.perf_counter() - setup_start,
+            "temporal_codec_kind": temporal_codec_kind,
+            "temporal_chunk_size": getattr(model, "chunk_size", None),
+            "temporal_num_heads": getattr(model, "num_heads", None),
+            "temporal_latent_tokens": getattr(model, "latent_tokens", None),
+            "memory_gb": _current_memory_gb(),
+        },
+    )
     resume_epoch = 0
     if resume_checkpoint_path is not None:
         checkpoint = torch.load(resume_checkpoint_path, map_location="cpu")
@@ -975,6 +1025,17 @@ def train_temporal_lstm_autoencoder(
     target_replay_logits: list[list[torch.Tensor]] = []
     if replay_loss_weight > 0:
         print("[rae_temporal] Loading LLM for teacher-forced replay loss...", flush=True)
+        _append_training_event(
+            progress_path,
+            {
+                "event": "setup_replay_targets_start",
+                "elapsed_s": time.perf_counter() - setup_start,
+                "replay_loss_weight": replay_loss_weight,
+                "replay_loss_steps": int(replay_loss_steps),
+                "replay_targets_total": len(cache_paths or []),
+                "memory_gb": _current_memory_gb(),
+            },
+        )
         if not cache_paths:
             raise ValueError("cache_paths are required when replay loss is enabled")
         first_bundle = load_cache_bundle(Path(cache_paths[0]))
@@ -990,12 +1051,13 @@ def train_temporal_lstm_autoencoder(
         for parameter in llm.parameters():
             parameter.requires_grad_(False)
         with torch.no_grad():
-            for path in cache_paths:
+            for replay_idx, path in enumerate(cache_paths, start=1):
                 bundle = load_cache_bundle(Path(path))
                 original_cache = cache_to_device(bundle["cache"], training_device)
                 output_text = None
-                if source_labels is not None and len(source_labels) > len(llm_bundles):
-                    output_text = source_labels[len(llm_bundles)].get("output_text")
+                row_idx = replay_idx - 1
+                if source_labels is not None and len(source_labels) > row_idx:
+                    output_text = source_labels[row_idx].get("output_text")
                 token_ids = _generation_tokens_for_replay(bundle, replay_loss_steps, tokenizer=tokenizer, output_text=output_text)
                 replay_token_ids.append(token_ids.cpu())
                 target_replay_logits.append(
@@ -1020,7 +1082,27 @@ def train_temporal_lstm_autoencoder(
                 del original_cache, token_ids
                 if training_device.type == "mps":
                     _empty_device_cache(training_device)
+                if replay_idx == 1 or replay_idx == len(cache_paths) or replay_idx % 25 == 0:
+                    _append_training_event(
+                        progress_path,
+                        {
+                            "event": "setup_replay_targets_progress",
+                            "elapsed_s": time.perf_counter() - setup_start,
+                            "loaded": replay_idx,
+                            "total": len(cache_paths),
+                            "memory_gb": _current_memory_gb(),
+                        },
+                    )
         print("[rae_temporal] Teacher-forced replay loss targets loaded.", flush=True)
+        _append_training_event(
+            progress_path,
+            {
+                "event": "setup_replay_targets_complete",
+                "elapsed_s": time.perf_counter() - setup_start,
+                "loaded": len(replay_token_ids),
+                "memory_gb": _current_memory_gb(),
+            },
+        )
     prompt_decoder = None
     prompt_targets = None
     prompt_target_mask = None
@@ -1028,6 +1110,16 @@ def train_temporal_lstm_autoencoder(
     prompt_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     if prompt_loss_weight > 0:
         print("[rae_temporal] Preparing token-level prompt auxiliary loss...", flush=True)
+        _append_training_event(
+            progress_path,
+            {
+                "event": "setup_prompt_targets_start",
+                "elapsed_s": time.perf_counter() - setup_start,
+                "prompt_loss_weight": prompt_loss_weight,
+                "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
+                "memory_gb": _current_memory_gb(),
+            },
+        )
         if not cache_paths:
             raise ValueError("cache_paths are required when prompt auxiliary loss is enabled")
         prompt_targets_cpu, prompt_mask_cpu, prompt_token_vocab = _prompt_token_targets_for_auxiliary_loss(
@@ -1049,6 +1141,16 @@ def train_temporal_lstm_autoencoder(
             f"prompt_tokens={prompt_targets.shape[1]} compact_vocab={len(prompt_token_vocab)} "
             f"hidden_dim={prompt_loss_hidden_dim} layers={prompt_loss_num_layers} heads={prompt_loss_num_heads}",
             flush=True,
+        )
+        _append_training_event(
+            progress_path,
+            {
+                "event": "setup_prompt_targets_complete",
+                "elapsed_s": time.perf_counter() - setup_start,
+                "prompt_tokens": int(prompt_targets.shape[1]),
+                "prompt_loss_compact_vocab": len(prompt_token_vocab),
+                "memory_gb": _current_memory_gb(),
+            },
         )
     opt_params = list(model.parameters())
     if prompt_decoder is not None:

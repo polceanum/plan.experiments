@@ -63,6 +63,11 @@ remain empty when the process is started through `conda run`, because stdout can
 be captured or buffered outside the training loop. Treat the JSONL file as the
 source of truth.
 
+The training loop writes setup-stage JSONL events before the first epoch:
+temporal matrix construction, normalization, model construction, frozen replay
+target loading, and prompt-target loading. This makes long local runs
+inspectable even while they are still preparing replay/prompt supervision.
+
 For human inspection, render the JSONL into a compact markdown status file and a
 readable line-oriented log:
 
