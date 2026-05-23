@@ -999,3 +999,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Restart the transformer point-codec run from scratch and confirm setup events plus cosine loss appear in the logs before allowing the run to continue.
+
+## 2026-05-23 - Fix silent reconstruction replay scans
+
+### Worked
+
+- Added pre-row progress messages to reconstruction scans and interpolation replay, including replay model loading and max_new_tokens, so slow CPU replay no longer appears hung before the first completed row. Verified epoch-30 one-row reconstruction scan with max_new_tokens=16 completed and wrote artifacts.
+
+### Did Not Work / Caveats
+
+- The default reconstruction/interpolation replay budget still expands to max(512, source_generated_tokens), which is too expensive to run casually while MPS training is active.
+
+### Left To Do
+
+- Use explicit small --max-new-tokens values for smoke replay scans during active training, and reserve full-budget reconstruction/interpolation sweeps for quieter windows.

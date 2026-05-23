@@ -1060,7 +1060,19 @@ def run_reconstruction_scan(
 
     chosen_model = model_id or str(records[0].get("model_id"))
     replay_device = choose_device(replay_device_name)
+    if progress_every > 0:
+        print(
+            f"[latent-reconstruction-scan] loading replay model={chosen_model} device={replay_device}",
+            file=sys.stderr,
+            flush=True,
+        )
     replay_model, tokenizer = load_model_and_tokenizer(chosen_model, replay_device, local_files_only=True)
+    if progress_every > 0:
+        print(
+            f"[latent-reconstruction-scan] replay model loaded; endpoints={len(indices)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     rows: list[dict[str, Any]] = []
     total = len(indices)
@@ -1074,6 +1086,13 @@ def run_reconstruction_scan(
         else:
             row_max_new_tokens = int(max_new_tokens)
         effective_budgets.append(row_max_new_tokens)
+        if progress_every > 0 and (scan_index == 1 or scan_index == total or scan_index % progress_every == 0):
+            print(
+                f"[latent-reconstruction-scan] starting {scan_index}/{total} task={record.get('task_id')} "
+                f"max_new_tokens={row_max_new_tokens}",
+                file=sys.stderr,
+                flush=True,
+            )
         bundle = load_cache_bundle(Path(str(record["cache_path"])))
         endpoint_shapes = bundle.get("shapes") or cache_shapes(bundle["cache"])
         aligned_shapes = _aligned_shapes_for_checkpoint(endpoint_shapes, seq_len)
@@ -1144,7 +1163,8 @@ def run_reconstruction_scan(
         )
         if progress_every > 0 and (scan_index == 1 or scan_index == total or scan_index % progress_every == 0):
             print(
-                f"[latent-reconstruction-scan] {scan_index}/{total} task={record.get('task_id')} correct={bool(correct) and error is None}",
+                f"[latent-reconstruction-scan] finished {scan_index}/{total} task={record.get('task_id')} "
+                f"correct={bool(correct) and error is None} error={error is not None}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1240,7 +1260,19 @@ def run_latent_interpolation(
 
     chosen_model = model_id or str(records[0].get("model_id"))
     replay_device = choose_device(replay_device_name)
+    if progress_every > 0:
+        print(
+            f"[latent-interpolate] loading replay model={chosen_model} device={replay_device}",
+            file=sys.stderr,
+            flush=True,
+        )
     replay_model, tokenizer = load_model_and_tokenizer(chosen_model, replay_device, local_files_only=True)
+    if progress_every > 0:
+        print(
+            f"[latent-interpolate] replay model loaded; total_replays={len(pairs_selected) * len(alphas) * 2}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     pair_rows: list[dict[str, Any]] = []
     replay_rows: list[dict[str, Any]] = []
@@ -1276,6 +1308,18 @@ def run_latent_interpolation(
                     row_max_new_tokens = max(512, source_budget)
                 else:
                     row_max_new_tokens = int(max_new_tokens)
+                if progress_every > 0 and (
+                    completed_replays + 1 == 1
+                    or completed_replays + 1 == total_replays
+                    or (completed_replays + 1) % progress_every == 0
+                ):
+                    print(
+                        f"[latent-interpolate] starting replay {completed_replays + 1}/{total_replays} "
+                        f"pair={pair.pair_id} alpha={alpha:.3f} context={context} "
+                        f"max_new_tokens={row_max_new_tokens}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 try:
                     cache_override = _decode_latent_to_cache(
                         z=z,

@@ -535,3 +535,47 @@ def test_run_reconstruction_scan_defaults_to_generous_source_generation_budget(t
     assert summary.max_effective_new_tokens == 512
     assert summary.token_budget_policy == "max_512_or_source_generated_tokens"
     assert summary.token_cap_hits == 0
+
+
+def test_run_reconstruction_scan_reports_starting_rows(tmp_path: Path, monkeypatch, capsys):
+    run_dir = _write_interpolation_run(tmp_path)
+    checkpoint = run_dir / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+
+    monkeypatch.setattr(
+        interpolation,
+        "_load_checkpoint_model",
+        lambda path: (
+            _FakeRAE(),
+            {
+                "normalization_mean": torch.zeros(1, 1, 2),
+                "normalization_std": torch.ones(1, 1, 2),
+            },
+        ),
+    )
+    monkeypatch.setattr(interpolation, "load_model_and_tokenizer", lambda *args, **kwargs: (SimpleNamespace(), SimpleNamespace()))
+    monkeypatch.setattr(
+        interpolation,
+        "greedy_continue_from_loaded_bundle",
+        lambda **kwargs: {
+            "text": "The answer is 1",
+            "generated_tokens": 3,
+            "max_new_tokens": kwargs["max_new_tokens"],
+            "hit_max_tokens": False,
+            "stop_reason": "eos",
+        },
+    )
+
+    run_reconstruction_scan(
+        run_dir,
+        checkpoint_path=checkpoint,
+        replay_device_name="cpu",
+        max_new_tokens=4,
+        limit=1,
+        progress_every=1,
+    )
+
+    stderr = capsys.readouterr().err
+    assert "loading replay model" in stderr
+    assert "starting 1/1" in stderr
+    assert "max_new_tokens=4" in stderr
+    assert "finished 1/1" in stderr
