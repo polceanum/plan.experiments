@@ -1367,6 +1367,16 @@ def train_temporal_lstm_autoencoder(
                     + (replay_loss_weight * replay_loss)
                     + (prompt_loss_weight * prompt_loss)
                 )
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "Non-finite training loss "
+                        f"at epoch={epoch} batch={batch_index}: "
+                        f"mse={float(reconstruction_loss.detach().cpu())} "
+                        f"cosine={float(cosine_loss.detach().cpu())} "
+                        f"latent_sep={float(latent_separation_loss.detach().cpu())} "
+                        f"replay_kl={float(replay_loss.detach().cpu())} "
+                        f"prompt_ce={float(prompt_loss.detach().cpu())}"
+                    )
                 loss.backward()
                 if grad_clip_norm and grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(opt_params, float(grad_clip_norm))
