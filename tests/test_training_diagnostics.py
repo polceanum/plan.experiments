@@ -122,3 +122,45 @@ def test_training_status_marks_replay_active_from_heartbeat_components(tmp_path)
 
     assert "Replay gradients: `True`" in (tmp_path / "status.md").read_text(encoding="utf-8")
     assert summary.replay_gradients is True
+
+
+def test_training_status_uses_latest_startup_session_for_completed_epochs(tmp_path):
+    path = tmp_path / "compressions" / "rae_temporal_training.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [
+        {
+            "event": "startup",
+            "epochs": 100,
+        },
+        {
+            "epoch": 58,
+            "epochs": 100,
+            "loss": 0.25,
+        },
+        {
+            "event": "training_error",
+            "epoch": 59,
+            "epochs": 100,
+        },
+        {
+            "event": "startup",
+            "epochs": 100,
+            "resume_epoch": 50,
+        },
+        {
+            "event": "batch_heartbeat",
+            "epoch": 51,
+            "epochs": 100,
+            "batch": 200,
+            "batches": 498,
+            "partial_loss": 0.27,
+        },
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    summary = render_training_status(tmp_path, "rae_temporal", status_path=tmp_path / "status.md")
+
+    assert summary.current_epoch == 51
+    assert summary.last_completed_epoch is None
+    status = (tmp_path / "status.md").read_text(encoding="utf-8")
+    assert "Last completed epoch" not in status

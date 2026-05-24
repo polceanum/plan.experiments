@@ -238,8 +238,11 @@ def render_training_status(
     if not rows:
         raise ValueError(f"No rows found in {log_path}")
 
-    last = rows[-1]
-    completed = [row for row in rows if row.get("loss") is not None]
+    last_startup_idx = max((idx for idx, row in enumerate(rows) if row.get("event") == "startup"), default=0)
+    active_rows = rows[last_startup_idx:]
+
+    last = active_rows[-1]
+    completed = [row for row in active_rows if row.get("loss") is not None]
     last_completed = completed[-1] if completed else None
     current_loss = _row_loss(last)
     replay_active = bool(last.get("replay_gradients", False))
