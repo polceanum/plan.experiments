@@ -246,6 +246,7 @@ def _load_checkpoint_model(checkpoint_path: Path) -> tuple[TemporalLSTMAutoEncod
         model_kwargs["decoder_memory_tokens"] = int(
             checkpoint.get("temporal_decoder_memory_tokens") or checkpoint.get("decoder_memory_tokens") or 1
         )
+        model_kwargs["flatten_latent_tokens"] = bool(checkpoint.get("temporal_flatten_latent_tokens"))
     model = model_class(**model_kwargs)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()

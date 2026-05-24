@@ -54,10 +54,21 @@ internal memory tokens, then reconstructs the temporal KV sequence from those
 memory tokens. This is the preferred capacity knob when the one-point run is
 learning but reconstructing generic or weak task-specific plans.
 
-Increasing `--temporal-latent-tokens` to 4 or 8 is a capacity probe, not the
-default scientific contract. Those runs still decode from a compact latent set,
-but interpolation is no longer a single point unless the latent tokens are
-flattened or pooled for analysis.
+Increasing `--temporal-latent-tokens` to 4 or 8 gives the transformer encoder
+multiple learned read-slots. To preserve the one-point scientific contract, use
+`--temporal-flatten-latent-tokens`: the slots are concatenated into one saved
+vector, so PCA/interpolation still operate on a single point while the encoder
+does not have to compress the full trajectory through one attention query. This
+is the preferred transformer point-codec recipe when strict one-query runs show
+latent collapse.
+
+Transformer point runs can also use `--latent-separation-loss-weight` with a
+small margin. This is an unlabeled anti-collapse regularizer on pairwise latent
+cosine similarity inside each mini-batch. It does not use task correctness or
+answers; it only prevents the encoder from mapping different trajectories to
+nearly collinear points. The practical recipe is staged: start with a small
+separation weight until point geometry spreads out, then reduce the weight so
+masked MSE/cosine reconstruction dominate.
 
 The RAE decoder reconstructs transformer KV state. It does not directly decode
 an answer string. The local LLM then performs normal autoregressive decoding
@@ -127,6 +138,7 @@ When both are enabled, the training objective is:
 ```text
 masked temporal KV MSE
   + cosine_loss_weight * masked temporal KV cosine distance
+  + latent_separation_loss_weight * unlabeled latent anti-collapse loss
   + replay_loss_weight * generated-token replay KL
   + prompt_loss_weight * prompt-token CE/KL
 ```

@@ -412,6 +412,17 @@ def _empty_device_cache(device: torch.device | str) -> None:
         torch.cuda.empty_cache()
 
 
+def _latent_pairwise_separation_loss(z: torch.Tensor, margin: float = 0.25) -> torch.Tensor:
+    flat = z.reshape(z.shape[0], -1).float()
+    if flat.shape[0] < 2:
+        return flat.new_tensor(0.0)
+    normalized = torch.nn.functional.normalize(flat, dim=-1, eps=1e-8)
+    similarities = normalized @ normalized.T
+    off_diagonal = ~torch.eye(similarities.shape[0], dtype=torch.bool, device=similarities.device)
+    pairwise = similarities[off_diagonal]
+    return torch.relu(pairwise - float(margin)).pow(2).mean()
+
+
 @dataclass
 class RandomProjectionCompressor:
     input_dim: int
@@ -704,6 +715,7 @@ class TemporalTransformerAutoEncoder(nn.Module):
         num_heads: int = 8,
         latent_tokens: int = 1,
         decoder_memory_tokens: int = 1,
+        flatten_latent_tokens: bool = False,
     ) -> None:
         super().__init__()
         self.token_dim = token_dim
@@ -714,6 +726,7 @@ class TemporalTransformerAutoEncoder(nn.Module):
         self.num_heads = num_heads
         self.latent_tokens = max(1, int(latent_tokens))
         self.decoder_memory_tokens = max(1, int(decoder_memory_tokens))
+        self.flatten_latent_tokens = bool(flatten_latent_tokens)
         self.token_to_hidden = nn.Sequential(
             nn.Linear(token_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -743,18 +756,16 @@ class TemporalTransformerAutoEncoder(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         if self.decoder_memory_tokens > 1:
-            self.decoder_memory_queries = nn.Parameter(torch.randn(self.decoder_memory_tokens, hidden_dim) * 0.02)
-            self.decoder_memory_attention = nn.MultiheadAttention(
-                hidden_dim,
-                num_heads,
-                dropout=0.0,
-                batch_first=True,
+            self.decoder_memory_from_latent = nn.Sequential(
+                nn.LayerNorm(latent_dim * self.latent_tokens),
+                nn.Linear(latent_dim * self.latent_tokens, hidden_dim * self.decoder_memory_tokens),
             )
-            self.decoder_memory_mlp = nn.Sequential(
+            self.decoder_memory_positions = nn.Parameter(torch.randn(self.decoder_memory_tokens, hidden_dim) * 0.02)
+            self.decoder_memory_refine = nn.Sequential(
                 nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim * 4),
                 nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
+                nn.Linear(hidden_dim * 4, hidden_dim),
             )
         self.decoder_positions = nn.Parameter(torch.randn(max_tokens, hidden_dim) * 0.02)
         decoder_layer = nn.TransformerDecoderLayer(
@@ -782,25 +793,37 @@ class TemporalTransformerAutoEncoder(nn.Module):
         latents = self.to_latent(encoded[:, : self.latent_tokens, :])
         if self.latent_tokens == 1:
             return latents[:, 0, :]
+        if self.flatten_latent_tokens:
+            return latents.reshape(batch, self.latent_tokens * self.latent_dim)
         return latents
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         if z.dim() == 2:
-            z = z.unsqueeze(1)
+            if self.latent_tokens > 1 and z.shape[-1] == self.latent_tokens * self.latent_dim:
+                z = z.reshape(z.shape[0], self.latent_tokens, self.latent_dim)
+            elif z.shape[-1] == self.latent_dim:
+                z = z.unsqueeze(1)
+            else:
+                raise ValueError(
+                    "Flat transformer latent has incompatible width: "
+                    f"got {z.shape[-1]}, expected {self.latent_dim} or {self.latent_tokens * self.latent_dim}"
+                )
         if z.dim() != 3:
             raise ValueError(f"Expected [batch, latent_dim] or [batch, latent_tokens, latent_dim], got {tuple(z.shape)}")
-        latent_memory = self.latent_to_hidden(z)
-        if self.decoder_memory_tokens > 1:
-            queries = self.decoder_memory_queries.unsqueeze(0).expand(z.shape[0], -1, -1)
-            attended, _ = self.decoder_memory_attention(
-                queries,
-                latent_memory,
-                latent_memory,
-                need_weights=False,
+        if z.shape[1] != self.latent_tokens or z.shape[2] != self.latent_dim:
+            raise ValueError(
+                f"Expected latent shape [batch, {self.latent_tokens}, {self.latent_dim}], got {tuple(z.shape)}"
             )
-            memory = self.decoder_memory_mlp(attended + queries)
+        if self.decoder_memory_tokens > 1:
+            memory = self.decoder_memory_from_latent(z.reshape(z.shape[0], -1)).reshape(
+                z.shape[0],
+                self.decoder_memory_tokens,
+                self.hidden_dim,
+            )
+            memory = memory + self.decoder_memory_positions.unsqueeze(0)
+            memory = memory + self.decoder_memory_refine(memory)
         else:
-            memory = latent_memory
+            memory = self.latent_to_hidden(z)
         queries = self.decoder_positions.unsqueeze(0).expand(z.shape[0], self.max_tokens, self.hidden_dim)
         decoded = self.decoder(tgt=queries, memory=memory)
         return self.output(decoded)
@@ -916,6 +939,8 @@ def train_temporal_lstm_autoencoder(
     replay_loss_weight: float = 0.0,
     replay_loss_steps: int = 0,
     cosine_loss_weight: float = 0.0,
+    latent_separation_loss_weight: float = 0.0,
+    latent_separation_margin: float = 0.25,
     source_labels: list[dict[str, Any]] | None = None,
     progress_path: Path | None = None,
     log_every: int = 1,
@@ -937,6 +962,7 @@ def train_temporal_lstm_autoencoder(
     temporal_num_heads: int = 8,
     temporal_latent_tokens: int = 1,
     temporal_decoder_memory_tokens: int = 1,
+    temporal_flatten_latent_tokens: bool = False,
     checkpoint_stem: str = "rae_temporal",
 ) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     setup_start = time.perf_counter()
@@ -945,6 +971,8 @@ def train_temporal_lstm_autoencoder(
     llm_loss_weight = float(llm_loss_weight)
     replay_loss_weight = float(replay_loss_weight)
     cosine_loss_weight = float(cosine_loss_weight)
+    latent_separation_loss_weight = float(latent_separation_loss_weight)
+    latent_separation_margin = float(latent_separation_margin)
     prompt_loss_weight = float(prompt_loss_weight)
     if llm_loss_weight != 0.0:
         raise ValueError(
@@ -965,7 +993,10 @@ def train_temporal_lstm_autoencoder(
             "num_layers": num_layers,
             "temporal_codec_kind": temporal_codec_kind,
             "temporal_decoder_memory_tokens": int(temporal_decoder_memory_tokens),
+            "temporal_flatten_latent_tokens": bool(temporal_flatten_latent_tokens),
             "cosine_loss_weight": cosine_loss_weight,
+            "latent_separation_loss_weight": latent_separation_loss_weight,
+            "latent_separation_margin": latent_separation_margin,
             "replay_loss_weight": replay_loss_weight,
             "replay_loss_steps": int(replay_loss_steps),
             "prompt_loss_weight": prompt_loss_weight,
@@ -1020,7 +1051,13 @@ def train_temporal_lstm_autoencoder(
         model_kwargs["num_heads"] = max(1, int(temporal_num_heads))
         model_kwargs["latent_tokens"] = max(1, int(temporal_latent_tokens))
         model_kwargs["decoder_memory_tokens"] = max(1, int(temporal_decoder_memory_tokens))
+        model_kwargs["flatten_latent_tokens"] = bool(temporal_flatten_latent_tokens)
     model = model_class(**model_kwargs).to(training_device)
+    latent_output_dim = (
+        int(latent_dim) * max(1, int(temporal_latent_tokens))
+        if temporal_codec_kind == "transformer" and bool(temporal_flatten_latent_tokens)
+        else int(latent_dim)
+    )
     print("[rae_temporal] Model constructed.", flush=True)
     _append_training_event(
         progress_path,
@@ -1032,6 +1069,7 @@ def train_temporal_lstm_autoencoder(
             "temporal_num_heads": getattr(model, "num_heads", None),
             "temporal_latent_tokens": getattr(model, "latent_tokens", None),
             "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
+            "temporal_flatten_latent_tokens": getattr(model, "flatten_latent_tokens", None),
             "memory_gb": _current_memory_gb(),
         },
     )
@@ -1160,7 +1198,7 @@ def train_temporal_lstm_autoencoder(
         prompt_targets = prompt_targets_cpu.to(training_device)
         prompt_target_mask = prompt_mask_cpu.to(training_device)
         prompt_decoder = LatentPromptTokenDecoder(
-            latent_dim=latent_dim,
+            latent_dim=latent_output_dim,
             vocab_size=len(prompt_token_vocab),
             max_prompt_tokens=int(prompt_targets.shape[1]),
             hidden_dim=int(prompt_loss_hidden_dim),
@@ -1208,6 +1246,8 @@ def train_temporal_lstm_autoencoder(
         "deprecated_llm_loss_weight": llm_loss_weight,
         "deprecated_llm_steps": llm_steps,
         "cosine_loss_weight": cosine_loss_weight,
+        "latent_separation_loss_weight": latent_separation_loss_weight,
+        "latent_separation_margin": latent_separation_margin,
         "replay_loss_weight": replay_loss_weight,
         "replay_loss_steps": replay_loss_steps,
         "log_every": log_every,
@@ -1229,6 +1269,8 @@ def train_temporal_lstm_autoencoder(
         "temporal_num_heads": getattr(model, "num_heads", None),
         "temporal_latent_tokens": getattr(model, "latent_tokens", None),
         "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
+        "temporal_flatten_latent_tokens": getattr(model, "flatten_latent_tokens", None),
+        "effective_latent_dim": latent_output_dim,
         "note": "Startup event before first epoch."
     }
     _append_training_event(progress_path, startup_event)
@@ -1240,16 +1282,23 @@ def train_temporal_lstm_autoencoder(
             reconstruction_numerator = 0.0
             denominator_total = 0.0
             cosine_loss_total = 0.0
+            latent_separation_loss_total = 0.0
+            latent_separation_loss_observations = 0
             replay_loss_total = 0.0
             replay_loss_observations = 0
             prompt_loss_total = 0.0
             prompt_loss_observations = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
+            if batch_size < int(normalized.shape[0]):
+                epoch_indices = torch.randperm(int(normalized.shape[0]))
+            else:
+                epoch_indices = torch.arange(int(normalized.shape[0]))
             for batch_index, batch_start in enumerate(range(0, int(normalized.shape[0]), batch_size), start=1):
                 batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
-                batch_normalized = normalized[batch_start:batch_stop].to(training_device)
-                batch_token_mask = token_mask[batch_start:batch_stop].to(training_device)
-                batch_feature_mask = feature_mask[batch_start:batch_stop].to(training_device)
+                batch_indices = epoch_indices[batch_start:batch_stop]
+                batch_normalized = normalized[batch_indices].to(training_device)
+                batch_token_mask = token_mask[batch_indices].to(training_device)
+                batch_feature_mask = feature_mask[batch_indices].to(training_device)
                 batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
                 opt.zero_grad(set_to_none=True)
                 z = model.encode(batch_normalized, token_mask=batch_token_mask)
@@ -1265,10 +1314,18 @@ def train_temporal_lstm_autoencoder(
                     cosine_loss = (cosine_per_token * batch_token_mask.float()).sum() / batch_token_mask.float().sum().clamp_min(1.0)
                 else:
                     cosine_loss = reconstructed_norm.new_tensor(0.0)
+                if latent_separation_loss_weight > 0:
+                    latent_separation_loss = _latent_pairwise_separation_loss(z, margin=latent_separation_margin).to(
+                        reconstructed_norm.dtype
+                    )
+                    if z.reshape(z.shape[0], -1).shape[0] > 1:
+                        latent_separation_loss_observations += 1
+                else:
+                    latent_separation_loss = reconstructed_norm.new_tensor(0.0)
                 replay_loss = reconstructed_norm.new_tensor(0.0)
                 prompt_loss = reconstructed_norm.new_tensor(0.0)
                 if prompt_decoder is not None and prompt_targets is not None:
-                    batch_prompt_targets = prompt_targets[batch_start:batch_stop]
+                    batch_prompt_targets = prompt_targets[batch_indices.to(prompt_targets.device)]
                     prompt_logits = prompt_decoder(z, prompt_length=int(batch_prompt_targets.shape[1]))
                     prompt_loss = prompt_loss_fn(
                         prompt_logits.reshape(-1, len(prompt_token_vocab)),
@@ -1284,7 +1341,7 @@ def train_temporal_lstm_autoencoder(
                     reconstructed_sequence = ((reconstructed_norm * std_device) + mean_device) * batch_feature_mask
                     replay_losses = []
                     for local_idx, row in enumerate(reconstructed_sequence):
-                        row_idx = batch_start + local_idx
+                        row_idx = int(batch_indices[local_idx].item())
                         aligned = _temporal_to_aligned_vector_grad(row, aligned_shapes)
                         compact = _aligned_to_compact_grad(aligned, shapes[row_idx], aligned_shapes)
                         reconstructed_cache = _unflatten_cache_grad(compact, shapes[row_idx])
@@ -1306,6 +1363,7 @@ def train_temporal_lstm_autoencoder(
                 loss = (
                     reconstruction_loss
                     + (cosine_loss_weight * cosine_loss)
+                    + (latent_separation_loss_weight * latent_separation_loss)
                     + (replay_loss_weight * replay_loss)
                     + (prompt_loss_weight * prompt_loss)
                 )
@@ -1316,6 +1374,7 @@ def train_temporal_lstm_autoencoder(
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
                 cosine_loss_total += float(cosine_loss.detach().item())
+                latent_separation_loss_total += float(latent_separation_loss.detach().item())
                 replay_loss_total += float(replay_loss.detach().item())
                 prompt_loss_total += float(prompt_loss.detach().item())
                 if (
@@ -1328,6 +1387,9 @@ def train_temporal_lstm_autoencoder(
                 ):
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
                     partial_cosine_loss = cosine_loss_total / max(batch_index, 1)
+                    partial_latent_separation_loss = latent_separation_loss_total / max(
+                        latent_separation_loss_observations, 1
+                    )
                     partial_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
                     partial_effective_replay_loss = replay_loss_total / max(batch_index, 1)
                     partial_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
@@ -1344,16 +1406,21 @@ def train_temporal_lstm_autoencoder(
                         "training_method": "rae_temporal",
                         "partial_loss": partial_reconstruction_loss
                         + (cosine_loss_weight * partial_cosine_loss)
+                        + (latent_separation_loss_weight * partial_latent_separation_loss)
                         + (replay_loss_weight * partial_effective_replay_loss)
                         + (prompt_loss_weight * partial_prompt_loss),
                         "partial_loss_components": {
                             "masked_temporal_reconstruction_mse": partial_reconstruction_loss,
                             "masked_temporal_cosine_distance": partial_cosine_loss,
+                            "latent_pairwise_separation": partial_latent_separation_loss,
                             "teacher_forced_generation_replay_kl": partial_sampled_replay_loss,
                             "teacher_forced_generation_replay_kl_effective": partial_effective_replay_loss,
                             "prompt_token_reconstruction_ce": partial_prompt_loss,
                         },
                         "cosine_loss_weight": cosine_loss_weight,
+                        "latent_separation_loss_weight": latent_separation_loss_weight,
+                        "latent_separation_margin": latent_separation_margin,
+                        "latent_separation_loss_observations": latent_separation_loss_observations,
                         "replay_loss_every_n_batches": replay_loss_every_n_batches,
                         "replay_loss_observations": replay_loss_observations,
                         "prompt_loss_weight": prompt_loss_weight,
@@ -1367,18 +1434,20 @@ def train_temporal_lstm_autoencoder(
                         f"elapsed={heartbeat['elapsed_s']:.1f}s",
                         flush=True,
                     )
-                del batch_normalized, batch_token_mask, batch_feature_mask, z, reconstructed_norm, reconstruction_loss, cosine_loss, replay_loss, prompt_loss, loss
+                del batch_normalized, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
                 if mps_empty_cache_every_batches > 0 and batch_index % int(mps_empty_cache_every_batches) == 0:
                     gc.collect()
                     _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
             mean_cosine_loss = cosine_loss_total / max(total_batches, 1)
+            mean_latent_separation_loss = latent_separation_loss_total / max(latent_separation_loss_observations, 1)
             mean_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
             mean_effective_replay_loss = replay_loss_total / max(total_batches, 1)
             mean_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
             mean_loss = (
                 mean_reconstruction_loss
                 + (cosine_loss_weight * mean_cosine_loss)
+                + (latent_separation_loss_weight * mean_latent_separation_loss)
                 + (replay_loss_weight * mean_effective_replay_loss)
                 + (prompt_loss_weight * mean_prompt_loss)
             )
@@ -1394,6 +1463,7 @@ def train_temporal_lstm_autoencoder(
                 "loss_components": {
                     "masked_temporal_reconstruction_mse": mean_reconstruction_loss,
                     "masked_temporal_cosine_distance": mean_cosine_loss,
+                    "latent_pairwise_separation": mean_latent_separation_loss,
                     "teacher_forced_generation_replay_kl": mean_sampled_replay_loss,
                     "teacher_forced_generation_replay_kl_effective": mean_effective_replay_loss,
                     "prompt_token_reconstruction_ce": mean_prompt_loss,
@@ -1409,6 +1479,10 @@ def train_temporal_lstm_autoencoder(
                 "deprecated_llm_steps": int(llm_steps),
                 "cosine_loss_weight": cosine_loss_weight,
                 "cosine_loss_gradients": cosine_loss_weight > 0,
+                "latent_separation_loss_weight": latent_separation_loss_weight,
+                "latent_separation_margin": latent_separation_margin,
+                "latent_separation_gradients": latent_separation_loss_weight > 0,
+                "latent_separation_loss_observations": latent_separation_loss_observations,
                 "replay_loss_weight": replay_loss_weight,
                 "replay_loss_steps": int(replay_loss_steps),
                 "replay_gradients": llm is not None and replay_loss_weight > 0,
@@ -1432,6 +1506,8 @@ def train_temporal_lstm_autoencoder(
                 "temporal_num_heads": getattr(model, "num_heads", None),
                 "temporal_latent_tokens": getattr(model, "latent_tokens", None),
                 "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
+                "temporal_flatten_latent_tokens": getattr(model, "flatten_latent_tokens", None),
+                "effective_latent_dim": latent_output_dim,
             }
             history.append(event)
             if log_every > 0 and (epoch == 1 or epoch == epochs or epoch % log_every == 0):
@@ -1440,6 +1516,7 @@ def train_temporal_lstm_autoencoder(
                     f"[rae_temporal epoch {epoch}/{epochs}] loss={event['loss']:.6g} "
                     f"mse={event['loss_components']['masked_temporal_reconstruction_mse']:.6g} "
                     f"cosine={event['loss_components']['masked_temporal_cosine_distance']:.6g} "
+                    f"latent_sep={event['loss_components']['latent_pairwise_separation']:.6g} "
                     f"replay_kl={event['loss_components']['teacher_forced_generation_replay_kl']:.6g} "
                     f"prompt_ce={event['loss_components']['prompt_token_reconstruction_ce']:.6g} "
                     f"seq_len={model.max_tokens} token_dim={model.token_dim} elapsed={event['elapsed_s']:.1f}s "
@@ -1455,6 +1532,7 @@ def train_temporal_lstm_autoencoder(
                     "normalization_mean": mean.detach().cpu(),
                     "normalization_std": std.detach().cpu(),
                     "latent_dim": latent_dim,
+                    "effective_latent_dim": latent_output_dim,
                     "hidden_dim": model.hidden_dim,
                     "num_layers": model.num_layers,
                     "seq_len": model.max_tokens,
@@ -1463,6 +1541,8 @@ def train_temporal_lstm_autoencoder(
                     "deprecated_llm_loss_weight": llm_loss_weight,
                     "deprecated_llm_steps": int(llm_steps),
                     "cosine_loss_weight": cosine_loss_weight,
+                    "latent_separation_loss_weight": latent_separation_loss_weight,
+                    "latent_separation_margin": latent_separation_margin,
                     "replay_loss_weight": replay_loss_weight,
                     "replay_loss_steps": int(replay_loss_steps),
                     "replay_loss_every_n_batches": replay_loss_every_n_batches,
@@ -1480,13 +1560,14 @@ def train_temporal_lstm_autoencoder(
                     "temporal_num_heads": getattr(model, "num_heads", None),
                     "temporal_latent_tokens": getattr(model, "latent_tokens", None),
                     "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
+                    "temporal_flatten_latent_tokens": getattr(model, "flatten_latent_tokens", None),
                 }
                 if prompt_decoder is not None:
                     checkpoint["prompt_decoder_state_dict"] = {
                         key: value.detach().cpu() for key, value in prompt_decoder.state_dict().items()
                     }
                     checkpoint["prompt_decoder_config"] = {
-                        "latent_dim": int(latent_dim),
+                        "latent_dim": int(latent_output_dim),
                         "vocab_size": len(prompt_token_vocab),
                         "token_id_vocab": prompt_token_vocab,
                         "max_prompt_tokens": int(prompt_targets.shape[1]) if prompt_targets is not None else 0,
@@ -1542,6 +1623,9 @@ def train_temporal_lstm_autoencoder(
         "objective": "masked_temporal_reconstruction_mse_plus_optional_masked_temporal_cosine_distance_plus_optional_teacher_forced_generation_replay_kl",
         "masked_temporal_cosine_distance_weight": cosine_loss_weight,
         "masked_temporal_cosine_distance_gradients": cosine_loss_weight > 0,
+        "latent_pairwise_separation_weight": latent_separation_loss_weight,
+        "latent_pairwise_separation_margin": latent_separation_margin,
+        "latent_pairwise_separation_gradients": latent_separation_loss_weight > 0,
         "deprecated_llm_loss_weight": llm_loss_weight,
         "deprecated_llm_steps": int(llm_steps),
         "teacher_forced_generation_replay_kl_weight": replay_loss_weight,
@@ -1556,7 +1640,7 @@ def train_temporal_lstm_autoencoder(
         "prompt_loss_num_heads": int(prompt_loss_num_heads),
         "prompt_loss_compact_vocab": len(prompt_token_vocab),
         "prompt_decoder_config": {
-            "latent_dim": int(latent_dim),
+            "latent_dim": int(latent_output_dim),
             "vocab_size": len(prompt_token_vocab),
             "token_id_vocab": prompt_token_vocab,
             "max_prompt_tokens": int(prompt_targets.shape[1]) if prompt_targets is not None else 0,
@@ -1586,6 +1670,8 @@ def train_temporal_lstm_autoencoder(
         "temporal_num_heads": getattr(model, "num_heads", None),
         "temporal_latent_tokens": getattr(model, "latent_tokens", None),
         "temporal_decoder_memory_tokens": getattr(model, "decoder_memory_tokens", None),
+        "temporal_flatten_latent_tokens": getattr(model, "flatten_latent_tokens", None),
+        "effective_latent_dim": latent_output_dim,
         "latent_summary": "per_chunk_masked_mean_encoded"
         if temporal_codec_kind == "chunked"
         else "learned_latent_tokens_from_transformer_encoder"
@@ -1629,6 +1715,8 @@ def run_compression(
     replay_loss_weight: float = 0.0,
     replay_loss_steps: int = 0,
     cosine_loss_weight: float = 0.0,
+    latent_separation_loss_weight: float = 0.0,
+    latent_separation_margin: float = 0.25,
     log_every: int = 1,
     checkpoint_every: int = 0,
     heartbeat_every_batches: int = 100,
@@ -1646,6 +1734,7 @@ def run_compression(
     temporal_num_heads: int = 8,
     temporal_latent_tokens: int = 1,
     temporal_decoder_memory_tokens: int = 1,
+    temporal_flatten_latent_tokens: bool = False,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -1721,6 +1810,8 @@ def run_compression(
             replay_loss_weight=replay_loss_weight,
             replay_loss_steps=replay_loss_steps,
             cosine_loss_weight=cosine_loss_weight,
+            latent_separation_loss_weight=latent_separation_loss_weight,
+            latent_separation_margin=latent_separation_margin,
             source_labels=cache_matrix.labels,
             progress_path=progress_path,
             log_every=log_every,
@@ -1742,6 +1833,7 @@ def run_compression(
             temporal_num_heads=temporal_num_heads,
             temporal_latent_tokens=temporal_latent_tokens,
             temporal_decoder_memory_tokens=temporal_decoder_memory_tokens,
+            temporal_flatten_latent_tokens=temporal_flatten_latent_tokens,
             checkpoint_stem=method,
         )
         mean = stats.pop("normalization_mean")
@@ -1795,6 +1887,7 @@ def run_compression(
         or (
             artifact.get("temporal_codec_kind") == "transformer"
             and int(artifact.get("temporal_latent_tokens") or 1) > 1
+            and not bool(artifact.get("temporal_flatten_latent_tokens"))
         )
     )
     torch.save(
@@ -1809,6 +1902,7 @@ def run_compression(
             "vector_alignment": "per_layer_key_value_token_padding",
             "method": method,
             "latent_dim": latent_dim,
+            "effective_latent_dim": int(z.shape[-1]) if z.dim() == 2 else latent_dim,
             "codec_contract": {
                 "point_codec": True,
                 "geometry_only": False,

@@ -178,6 +178,10 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             bits.append(f"replay_weight={row.get('replay_loss_weight')}")
         if row.get("temporal_decoder_memory_tokens") is not None:
             bits.append(f"decoder_memory_tokens={row.get('temporal_decoder_memory_tokens')}")
+        if row.get("temporal_flatten_latent_tokens") is not None:
+            bits.append(f"flatten_latents={row.get('temporal_flatten_latent_tokens')}")
+        if row.get("latent_separation_loss_weight") is not None:
+            bits.append(f"latent_sep_weight={row.get('latent_separation_loss_weight')}")
         if row.get("memory_gb") is not None:
             bits.append(f"memory_gb={_format_float(row.get('memory_gb'))}")
         bits.append(f"elapsed_s={_format_float(row.get('elapsed_s'))}")
@@ -187,7 +191,10 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
         return (
             f"startup device={row.get('device')} epochs={row.get('epochs')} "
             f"shape={shape} latent_dim={row.get('latent_dim')} hidden_dim={row.get('hidden_dim')} "
+            f"effective_latent_dim={row.get('effective_latent_dim', row.get('latent_dim'))} "
             f"decoder_memory_tokens={row.get('temporal_decoder_memory_tokens')} "
+            f"flatten_latents={row.get('temporal_flatten_latent_tokens')} "
+            f"latent_sep_weight={row.get('latent_separation_loss_weight')} "
             f"replay_weight={row.get('replay_loss_weight')} replay_steps={row.get('replay_loss_steps')}"
         )
     if row.get("event") == "batch_heartbeat":
@@ -197,6 +204,7 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             f"partial_loss={_format_float(row.get('partial_loss'))} "
             f"mse={_format_float((row.get('partial_loss_components') or {}).get('masked_temporal_reconstruction_mse'))} "
             f"cosine={_format_float((row.get('partial_loss_components') or {}).get('masked_temporal_cosine_distance'))} "
+            f"latent_sep={_format_float((row.get('partial_loss_components') or {}).get('latent_pairwise_separation'))} "
             f"replay_kl={_format_float((row.get('partial_loss_components') or {}).get('teacher_forced_generation_replay_kl'))} "
             f"memory_gb={_format_float(row.get('memory_gb'))} "
             f"elapsed_s={_format_float(row.get('elapsed_s'))}"
@@ -208,6 +216,7 @@ def _human_log_line(row: dict[str, Any]) -> str | None:
             f"loss={_format_float(row.get('loss'))} "
             f"mse={_format_float(components.get('masked_temporal_reconstruction_mse'))} "
             f"cosine={_format_float(components.get('masked_temporal_cosine_distance'))} "
+            f"latent_sep={_format_float(components.get('latent_pairwise_separation'))} "
             f"replay_kl={_format_float(components.get('teacher_forced_generation_replay_kl'))} "
             f"memory_gb={_format_float(row.get('memory_gb'))} "
             f"elapsed_s={_format_float(row.get('elapsed_s'))}"
@@ -273,6 +282,7 @@ def render_training_status(
                 f"- epoch `{row.get('epoch')}`: loss `{_format_float(row.get('loss'))}`, "
                 f"mse `{_format_float(row_components.get('masked_temporal_reconstruction_mse'))}`, "
                 f"cosine `{_format_float(row_components.get('masked_temporal_cosine_distance'))}`, "
+                f"latent_sep `{_format_float(row_components.get('latent_pairwise_separation'))}`, "
                 f"replay_kl `{_format_float(row_components.get('teacher_forced_generation_replay_kl'))}`, "
                 f"memory `{_format_float(row.get('memory_gb'))}` GB"
             )

@@ -212,6 +212,8 @@ def cmd_compress(args: argparse.Namespace) -> int:
         replay_loss_weight=args.replay_loss_weight,
         replay_loss_steps=args.replay_loss_steps,
         cosine_loss_weight=args.cosine_loss_weight,
+        latent_separation_loss_weight=args.latent_separation_loss_weight,
+        latent_separation_margin=args.latent_separation_margin,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
         heartbeat_every_batches=args.heartbeat_every_batches,
@@ -229,6 +231,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         temporal_num_heads=args.temporal_num_heads,
         temporal_latent_tokens=args.temporal_latent_tokens,
         temporal_decoder_memory_tokens=args.temporal_decoder_memory_tokens,
+        temporal_flatten_latent_tokens=args.temporal_flatten_latent_tokens,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -753,6 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--replay-loss-steps", type=int, default=0, help="Generated reasoning tokens per cache for optional teacher-forced replay KL.")
     compress.add_argument("--replay-loss-every-n-batches", type=int, default=1, help="For rae_temporal, compute replay KL every N mini-batches; skipped batches use reconstruction MSE only.")
     compress.add_argument("--cosine-loss-weight", type=float, default=0.0, help="Weight for masked temporal KV cosine-distance reconstruction loss.")
+    compress.add_argument("--latent-separation-loss-weight", type=float, default=0.0, help="Weight for unlabeled pairwise latent anti-collapse loss inside each mini-batch.")
+    compress.add_argument("--latent-separation-margin", type=float, default=0.25, help="Cosine-similarity margin for pairwise latent anti-collapse loss.")
     compress.add_argument("--prompt-loss-weight", type=float, default=0.0, help="Weight for token-level prompt reconstruction CE/KL from the RAE latent.")
     compress.add_argument("--prompt-loss-max-tokens", type=int, default=None, help="Maximum prompt tokens supervised by the latent prompt head; default uses the full prompt.")
     compress.add_argument("--prompt-loss-hidden-dim", type=int, default=128, help="Hidden size for the auxiliary latent prompt decoder.")
@@ -778,6 +783,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Internal decoder memory tokens expanded from transformer latents; values >1 add decoder bandwidth while keeping one saved point when --temporal-latent-tokens=1.",
+    )
+    compress.add_argument(
+        "--temporal-flatten-latent-tokens",
+        action="store_true",
+        help="Flatten multiple transformer latent tokens into one stored interpolation point.",
     )
     compress.set_defaults(func=cmd_compress)
 

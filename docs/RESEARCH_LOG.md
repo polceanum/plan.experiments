@@ -1028,3 +1028,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Relaunch the full solved498 transformer point run with one latent point, a larger latent dimension, and multiple decoder memory tokens; inspect early MSE/cosine/replay/prompt losses before committing to a long sweep.
+
+## 2026-05-24 - Fix transformer point-codec collapse
+
+### Worked
+
+- Stopped the stalled mem8/ld2048 transformer point run. Replaced the degenerate single-key attention memory expansion with direct latent-to-memory projection, added flattened multi-slot transformer latents so several encoder read-slots are stored as one interpolation point, added shuffled mini-batches and an unlabeled pairwise latent separation loss, and documented the staged recipe. The 8-example solved-trajectory overfit gate now reaches compact MSE 0.0577 by epoch 400 with effective 4096-d flattened points, compared with earlier 8-example gates flattening around 0.58 MSE and near-collinear latents.
+
+### Did Not Work / Caveats
+
+- Widening a strict one-query point to latent_dim 4096 and 16 decoder memory tokens did not solve the collapse by itself; batch-8 at the old learning rate diverged, and a small separation term alone was too slow. The successful recipe first spreads points with flattened latent read-slots, then lowers the separation weight so reconstruction dominates.
+
+### Left To Do
+
+- Run the full solved498 transformer point-codec from scratch with temporal_latent_tokens=8, flattened latents, decoder_memory_tokens=16, train_batch_size=2, MSE plus cosine plus staged latent separation; analyze early checkpoints before adding replay KL or prompt CE.

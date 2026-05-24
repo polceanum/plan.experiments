@@ -13,6 +13,7 @@ from latent_kv.compressors import (
     TemporalLSTMAutoEncoder,
     TemporalPositionwiseAutoEncoder,
     TemporalTransformerAutoEncoder,
+    _latent_pairwise_separation_loss,
     _temporal_model_class,
     _compact_reconstructions,
     _temporal_matrix,
@@ -401,6 +402,15 @@ def test_temporal_transformer_one_point_can_expand_decoder_memory():
     assert model.decoder_memory_tokens == 4
 
 
+def test_latent_pairwise_separation_loss_penalizes_collapsed_codes():
+    collapsed = torch.ones(3, 4)
+    separated = torch.eye(3, 4)
+
+    assert _latent_pairwise_separation_loss(collapsed, margin=0.25).item() > 0
+    assert _latent_pairwise_separation_loss(separated, margin=0.25).item() == pytest.approx(0.0)
+    assert _latent_pairwise_separation_loss(collapsed[:1], margin=0.25).item() == pytest.approx(0.0)
+
+
 def test_temporal_transformer_autoencoder_can_use_multiple_latent_tokens():
     model = TemporalTransformerAutoEncoder(
         token_dim=4,
@@ -418,6 +428,28 @@ def test_temporal_transformer_autoencoder_can_use_multiple_latent_tokens():
     decoded = model.decode(z)
 
     assert z.shape == (2, 2, 3)
+    assert decoded.shape == x.shape
+
+
+def test_temporal_transformer_can_flatten_multiple_latent_tokens_to_one_point():
+    model = TemporalTransformerAutoEncoder(
+        token_dim=4,
+        max_tokens=5,
+        latent_dim=3,
+        hidden_dim=8,
+        num_layers=1,
+        num_heads=2,
+        latent_tokens=2,
+        decoder_memory_tokens=3,
+        flatten_latent_tokens=True,
+    )
+    x = torch.randn(2, 5, 4)
+    mask = torch.ones((2, 5), dtype=torch.bool)
+
+    z = model.encode(x, token_mask=mask)
+    decoded = model.decode(z)
+
+    assert z.shape == (2, 6)
     assert decoded.shape == x.shape
 
 
@@ -494,6 +526,35 @@ def test_temporal_transformer_compression_preserves_point_codec_contract(tmp_pat
     assert artifact["temporal_num_heads"] == 2
     assert artifact["temporal_latent_tokens"] == 1
     assert artifact["temporal_decoder_memory_tokens"] == 3
+
+
+def test_temporal_transformer_flattened_latent_tokens_still_save_one_point(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+    result = run_compression(
+        tmp_path,
+        method="rae_temporal_transformer",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        num_layers=1,
+        weight_decay=0.02,
+        log_every=1,
+        temporal_num_heads=2,
+        temporal_latent_tokens=2,
+        temporal_decoder_memory_tokens=3,
+        temporal_flatten_latent_tokens=True,
+    )
+    payload = torch.load(result.latent_path, map_location="cpu")
+    artifact = torch.load(result.artifact_path, map_location="cpu")
+
+    assert payload["latents"].shape == (2, 6)
+    assert payload["codec_contract"]["structured_latent_per_cache"] is False
+    assert payload["codec_contract"]["one_global_latent_vector_per_cache"] is True
+    assert payload["effective_latent_dim"] == 6
+    assert artifact["temporal_latent_tokens"] == 2
+    assert artifact["temporal_flatten_latent_tokens"] is True
+    assert artifact["effective_latent_dim"] == 6
 
 
 def test_temporal_mlp_rae_compression_writes_codec_kind(tmp_path: Path):
