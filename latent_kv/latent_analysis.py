@@ -74,6 +74,10 @@ class LatentAnalysisSummary:
     checkpoint_path: str
     checkpoint_epoch: int | None
     latent_dim: int
+    effective_latent_dim: int
+    temporal_latent_tokens: int | None
+    temporal_flatten_latent_tokens: bool
+    temporal_decoder_memory_tokens: int | None
     pca_explained_variance_ratio: list[float]
     category_counts: dict[str, int]
     primary_category_counts: dict[str, int]
@@ -304,17 +308,30 @@ def extract_checkpoint_latents(
                     flush=True,
                 )
 
+    all_latents = torch.cat(latents, dim=0)
+    temporal_latent_tokens = checkpoint.get("temporal_latent_tokens") or checkpoint.get("latent_tokens")
+    temporal_decoder_memory_tokens = checkpoint.get("temporal_decoder_memory_tokens") or checkpoint.get("decoder_memory_tokens")
+    flatten_latent_tokens = bool(checkpoint.get("temporal_flatten_latent_tokens"))
+    effective_latent_dim = int(
+        checkpoint.get("effective_latent_dim")
+        or (int(checkpoint["latent_dim"]) * int(temporal_latent_tokens or 1) if flatten_latent_tokens else all_latents.reshape(all_latents.shape[0], -1).shape[-1])
+    )
     metadata = {
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_epoch": int(checkpoint.get("epoch")) if checkpoint.get("epoch") is not None else _checkpoint_epoch(checkpoint_path),
         "latent_dim": int(checkpoint["latent_dim"]),
+        "effective_latent_dim": effective_latent_dim,
         "hidden_dim": int(checkpoint.get("hidden_dim", model.hidden_dim)),
         "num_layers": int(checkpoint.get("num_layers", model.num_layers)),
         "seq_len": int(checkpoint["seq_len"]),
         "token_dim": int(checkpoint["token_dim"]),
+        "temporal_latent_tokens": int(temporal_latent_tokens) if temporal_latent_tokens is not None else None,
+        "temporal_flatten_latent_tokens": flatten_latent_tokens,
+        "temporal_decoder_memory_tokens": int(temporal_decoder_memory_tokens) if temporal_decoder_memory_tokens is not None else None,
+        "latent_shape": list(all_latents.shape),
         "cache_paths": cache_paths,
     }
-    return torch.cat(latents, dim=0), metadata
+    return all_latents, metadata
 
 
 def pca_2d(latents: torch.Tensor) -> tuple[torch.Tensor, list[float]]:
@@ -519,6 +536,10 @@ def run_latent_analysis(
         checkpoint_path=str(checkpoint_path),
         checkpoint_epoch=checkpoint_epoch,
         latent_dim=int(metadata["latent_dim"]),
+        effective_latent_dim=int(metadata["effective_latent_dim"]),
+        temporal_latent_tokens=metadata["temporal_latent_tokens"],
+        temporal_flatten_latent_tokens=bool(metadata["temporal_flatten_latent_tokens"]),
+        temporal_decoder_memory_tokens=metadata["temporal_decoder_memory_tokens"],
         pca_explained_variance_ratio=variance_ratio,
         category_counts=dict(sorted(category_counts.items())),
         primary_category_counts=dict(sorted(primary_counts.items())),
