@@ -421,6 +421,13 @@ def _gradients_are_finite(parameters: list[nn.Parameter]) -> bool:
     return True
 
 
+def _parameters_are_finite(parameters: list[nn.Parameter]) -> bool:
+    for parameter in parameters:
+        if not torch.isfinite(parameter.detach()).all():
+            return False
+    return True
+
+
 def _empty_device_cache(device: torch.device | str) -> None:
     device_type = torch.device(device).type
     if device_type == "mps" and hasattr(torch, "mps"):
@@ -1306,6 +1313,7 @@ def train_temporal_lstm_autoencoder(
             prompt_loss_total = 0.0
             prompt_loss_observations = 0
             skipped_optimizer_steps = 0
+            skipped_forward_batches = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
             if batch_size < int(normalized.shape[0]):
                 epoch_indices = torch.randperm(int(normalized.shape[0]))
@@ -1386,15 +1394,63 @@ def train_temporal_lstm_autoencoder(
                     + (prompt_loss_weight * prompt_loss)
                 )
                 if not torch.isfinite(loss):
-                    raise FloatingPointError(
-                        "Non-finite training loss "
-                        f"at epoch={epoch} batch={batch_index}: "
-                        f"mse={float(reconstruction_loss.detach().cpu())} "
-                        f"cosine={float(cosine_loss.detach().cpu())} "
-                        f"latent_sep={float(latent_separation_loss.detach().cpu())} "
-                        f"replay_kl={float(replay_loss.detach().cpu())} "
-                        f"prompt_ce={float(prompt_loss.detach().cpu())}"
+                    loss_components = {
+                        "masked_temporal_reconstruction_mse": _scalar_to_float(reconstruction_loss),
+                        "masked_temporal_cosine_distance": _scalar_to_float(cosine_loss),
+                        "latent_pairwise_separation": _scalar_to_float(latent_separation_loss),
+                        "teacher_forced_generation_replay_kl": _scalar_to_float(replay_loss),
+                        "prompt_token_reconstruction_ce": _scalar_to_float(prompt_loss),
+                    }
+                    input_finite = bool(torch.isfinite(batch_normalized).all().detach().cpu().item())
+                    latent_finite = bool(torch.isfinite(z).all().detach().cpu().item())
+                    reconstruction_finite = bool(torch.isfinite(reconstructed_norm).all().detach().cpu().item())
+                    parameters_finite = _parameters_are_finite(opt_params)
+                    if not input_finite or not parameters_finite:
+                        raise FloatingPointError(
+                            "Non-finite training loss with non-finite "
+                            f"{'input' if not input_finite else 'parameters'} "
+                            f"at epoch={epoch} batch={batch_index}: "
+                            f"mse={loss_components['masked_temporal_reconstruction_mse']} "
+                            f"cosine={loss_components['masked_temporal_cosine_distance']} "
+                            f"latent_sep={loss_components['latent_pairwise_separation']} "
+                            f"replay_kl={loss_components['teacher_forced_generation_replay_kl']} "
+                            f"prompt_ce={loss_components['prompt_token_reconstruction_ce']}"
+                        )
+                    skipped_forward_batches += 1
+                    _append_training_event(
+                        progress_path,
+                        {
+                            "event": "nonfinite_forward_skipped",
+                            "elapsed_s": time.perf_counter() - start,
+                            "epoch_elapsed_s": time.perf_counter() - epoch_start,
+                            "epoch": epoch,
+                            "epochs": epochs,
+                            "batch": batch_index,
+                            "batches": total_batches,
+                            "batch_start": batch_start,
+                            "batch_stop": batch_stop,
+                            "loss_components": loss_components,
+                            "input_finite": input_finite,
+                            "latent_finite": latent_finite,
+                            "reconstruction_finite": reconstruction_finite,
+                            "parameters_finite": parameters_finite,
+                            "replay_loss_active": replay_loss_active,
+                            "skipped_forward_batches": skipped_forward_batches,
+                            "skipped_optimizer_steps": skipped_optimizer_steps,
+                            "memory_gb": _current_memory_gb(),
+                        },
                     )
+                    print(
+                        f"[rae_temporal epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                        "skipped batch due to non-finite forward loss with finite parameters",
+                        flush=True,
+                    )
+                    opt.zero_grad(set_to_none=True)
+                    del batch_normalized, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
+                    if mps_empty_cache_every_batches > 0:
+                        gc.collect()
+                        _empty_device_cache(training_device)
+                    continue
                 loss.backward()
                 optimizer_step_skipped = False
                 grad_norm_value = None
@@ -1456,13 +1512,14 @@ def train_temporal_lstm_autoencoder(
                         or batch_index % heartbeat_every_batches == 0
                     )
                 ):
+                    observed_batches = max(batch_index - skipped_forward_batches, 1)
                     partial_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-                    partial_cosine_loss = cosine_loss_total / max(batch_index, 1)
+                    partial_cosine_loss = cosine_loss_total / observed_batches
                     partial_latent_separation_loss = latent_separation_loss_total / max(
                         latent_separation_loss_observations, 1
                     )
                     partial_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
-                    partial_effective_replay_loss = replay_loss_total / max(batch_index, 1)
+                    partial_effective_replay_loss = replay_loss_total / observed_batches
                     partial_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
                     heartbeat = {
                         "event": "batch_heartbeat",
@@ -1496,6 +1553,7 @@ def train_temporal_lstm_autoencoder(
                         "replay_loss_observations": replay_loss_observations,
                         "prompt_loss_weight": prompt_loss_weight,
                         "prompt_loss_observations": prompt_loss_observations,
+                        "skipped_forward_batches": skipped_forward_batches,
                         "skipped_optimizer_steps": skipped_optimizer_steps,
                         "memory_gb": _current_memory_gb(),
                     }
@@ -1511,10 +1569,11 @@ def train_temporal_lstm_autoencoder(
                     gc.collect()
                     _empty_device_cache(training_device)
             mean_reconstruction_loss = reconstruction_numerator / max(denominator_total, 1.0)
-            mean_cosine_loss = cosine_loss_total / max(total_batches, 1)
+            observed_batches = max(total_batches - skipped_forward_batches, 1)
+            mean_cosine_loss = cosine_loss_total / observed_batches
             mean_latent_separation_loss = latent_separation_loss_total / max(latent_separation_loss_observations, 1)
             mean_sampled_replay_loss = replay_loss_total / max(replay_loss_observations, 1)
-            mean_effective_replay_loss = replay_loss_total / max(total_batches, 1)
+            mean_effective_replay_loss = replay_loss_total / observed_batches
             mean_prompt_loss = prompt_loss_total / max(prompt_loss_observations, 1)
             mean_loss = (
                 mean_reconstruction_loss
@@ -1562,6 +1621,7 @@ def train_temporal_lstm_autoencoder(
                 "replay_loss_observations": replay_loss_observations,
                 "prompt_loss_weight": prompt_loss_weight,
                 "prompt_loss_observations": prompt_loss_observations,
+                "skipped_forward_batches": skipped_forward_batches,
                 "skipped_optimizer_steps": skipped_optimizer_steps,
                 "prompt_decoder_gradients": prompt_decoder is not None and prompt_loss_weight > 0,
                 "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,

@@ -721,6 +721,45 @@ def test_temporal_rae_skips_nonfinite_gradient_update(tmp_path: Path, monkeypatc
     assert epoch_rows[0]["skipped_optimizer_steps"] == 2
 
 
+def test_temporal_rae_skips_finite_weight_nonfinite_forward_batch(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+    original_decode = TemporalTransformerAutoEncoder.decode
+    calls = {"decode": 0}
+
+    def decode_once_with_nan(self, z):
+        decoded = original_decode(self, z)
+        calls["decode"] += 1
+        if calls["decode"] == 1:
+            return torch.full_like(decoded, float("nan"))
+        return decoded
+
+    monkeypatch.setattr(TemporalTransformerAutoEncoder, "decode", decode_once_with_nan)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal_transformer",
+        latent_dim=4,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        num_layers=1,
+        train_batch_size=1,
+        grad_clip_norm=0.25,
+        temporal_num_heads=2,
+        temporal_latent_tokens=1,
+        log_every=1,
+    )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_transformer_training.jsonl")
+    skipped_rows = [row for row in training_rows if row.get("event") == "nonfinite_forward_skipped"]
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
+
+    assert len(skipped_rows) == 1
+    assert skipped_rows[0]["parameters_finite"] is True
+    assert skipped_rows[0]["input_finite"] is True
+    assert skipped_rows[0]["reconstruction_finite"] is False
+    assert epoch_rows[0]["skipped_forward_batches"] == 1
+
+
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
     _write_run(tmp_path)
 
