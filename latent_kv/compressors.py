@@ -404,6 +404,23 @@ def _current_memory_gb() -> float:
         return -1.0
 
 
+def _scalar_to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            return None
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def _gradients_are_finite(parameters: list[nn.Parameter]) -> bool:
+    for parameter in parameters:
+        if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+            return False
+    return True
+
+
 def _empty_device_cache(device: torch.device | str) -> None:
     device_type = torch.device(device).type
     if device_type == "mps" and hasattr(torch, "mps"):
@@ -1288,6 +1305,7 @@ def train_temporal_lstm_autoencoder(
             replay_loss_observations = 0
             prompt_loss_total = 0.0
             prompt_loss_observations = 0
+            skipped_optimizer_steps = 0
             total_batches = (int(normalized.shape[0]) + batch_size - 1) // batch_size
             if batch_size < int(normalized.shape[0]):
                 epoch_indices = torch.randperm(int(normalized.shape[0]))
@@ -1378,9 +1396,52 @@ def train_temporal_lstm_autoencoder(
                         f"prompt_ce={float(prompt_loss.detach().cpu())}"
                     )
                 loss.backward()
+                optimizer_step_skipped = False
+                grad_norm_value = None
                 if grad_clip_norm and grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(opt_params, float(grad_clip_norm))
-                opt.step()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        opt_params,
+                        float(grad_clip_norm),
+                        error_if_nonfinite=False,
+                    )
+                    grad_norm_value = _scalar_to_float(grad_norm)
+                    optimizer_step_skipped = not bool(torch.isfinite(grad_norm).detach().cpu().item())
+                else:
+                    optimizer_step_skipped = not _gradients_are_finite(opt_params)
+                if optimizer_step_skipped:
+                    skipped_optimizer_steps += 1
+                    _append_training_event(
+                        progress_path,
+                        {
+                            "event": "nonfinite_gradient_skipped",
+                            "elapsed_s": time.perf_counter() - start,
+                            "epoch_elapsed_s": time.perf_counter() - epoch_start,
+                            "epoch": epoch,
+                            "epochs": epochs,
+                            "batch": batch_index,
+                            "batches": total_batches,
+                            "batch_start": batch_start,
+                            "batch_stop": batch_stop,
+                            "grad_norm": grad_norm_value,
+                            "loss": float(loss.detach().cpu()),
+                            "loss_components": {
+                                "masked_temporal_reconstruction_mse": float(reconstruction_loss.detach().cpu()),
+                                "masked_temporal_cosine_distance": float(cosine_loss.detach().cpu()),
+                                "latent_pairwise_separation": float(latent_separation_loss.detach().cpu()),
+                                "teacher_forced_generation_replay_kl": float(replay_loss.detach().cpu()),
+                                "prompt_token_reconstruction_ce": float(prompt_loss.detach().cpu()),
+                            },
+                            "memory_gb": _current_memory_gb(),
+                        },
+                    )
+                    print(
+                        f"[rae_temporal epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                        "skipped optimizer step due to non-finite gradients",
+                        flush=True,
+                    )
+                    opt.zero_grad(set_to_none=True)
+                else:
+                    opt.step()
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
                 cosine_loss_total += float(cosine_loss.detach().item())
@@ -1435,6 +1496,7 @@ def train_temporal_lstm_autoencoder(
                         "replay_loss_observations": replay_loss_observations,
                         "prompt_loss_weight": prompt_loss_weight,
                         "prompt_loss_observations": prompt_loss_observations,
+                        "skipped_optimizer_steps": skipped_optimizer_steps,
                         "memory_gb": _current_memory_gb(),
                     }
                     _append_training_event(progress_path, heartbeat)
@@ -1500,6 +1562,7 @@ def train_temporal_lstm_autoencoder(
                 "replay_loss_observations": replay_loss_observations,
                 "prompt_loss_weight": prompt_loss_weight,
                 "prompt_loss_observations": prompt_loss_observations,
+                "skipped_optimizer_steps": skipped_optimizer_steps,
                 "prompt_decoder_gradients": prompt_decoder is not None and prompt_loss_weight > 0,
                 "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
                 "prompt_loss_hidden_dim": int(prompt_loss_hidden_dim),

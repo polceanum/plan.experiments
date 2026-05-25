@@ -690,6 +690,37 @@ def test_temporal_rae_can_use_masked_cosine_reconstruction_gradients(tmp_path: P
     )
 
 
+def test_temporal_rae_skips_nonfinite_gradient_update(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+
+    def fake_clip_grad_norm_(parameters, max_norm, **kwargs):
+        del parameters, max_norm, kwargs
+        return torch.tensor(float("nan"))
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", fake_clip_grad_norm_)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal_transformer",
+        latent_dim=4,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        num_layers=1,
+        train_batch_size=1,
+        grad_clip_norm=0.25,
+        temporal_num_heads=2,
+        temporal_latent_tokens=1,
+        log_every=1,
+    )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_transformer_training.jsonl")
+    skipped_rows = [row for row in training_rows if row.get("event") == "nonfinite_gradient_skipped"]
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
+
+    assert len(skipped_rows) == 2
+    assert epoch_rows[0]["skipped_optimizer_steps"] == 2
+
+
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
     _write_run(tmp_path)
 
