@@ -428,6 +428,17 @@ def _parameters_are_finite(parameters: list[nn.Parameter]) -> bool:
     return True
 
 
+def _nonfinite_parameter_names(modules: list[tuple[str, nn.Module | None]]) -> list[str]:
+    names = []
+    for module_name, module in modules:
+        if module is None:
+            continue
+        for parameter_name, parameter in module.named_parameters():
+            if not torch.isfinite(parameter.detach()).all():
+                names.append(f"{module_name}.{parameter_name}")
+    return names
+
+
 def _empty_device_cache(device: torch.device | str) -> None:
     device_type = torch.device(device).type
     if device_type == "mps" and hasattr(torch, "mps"):
@@ -987,6 +998,8 @@ def train_temporal_lstm_autoencoder(
     temporal_latent_tokens: int = 1,
     temporal_decoder_memory_tokens: int = 1,
     temporal_flatten_latent_tokens: bool = False,
+    optimizer_eps: float = 1e-6,
+    optimizer_foreach: bool = False,
     checkpoint_stem: str = "rae_temporal",
 ) -> tuple[nn.Module, torch.Tensor, float, dict[str, Any], list[dict[str, Any]]]:
     setup_start = time.perf_counter()
@@ -998,6 +1011,7 @@ def train_temporal_lstm_autoencoder(
     latent_separation_loss_weight = float(latent_separation_loss_weight)
     latent_separation_margin = float(latent_separation_margin)
     prompt_loss_weight = float(prompt_loss_weight)
+    optimizer_eps = float(optimizer_eps)
     if llm_loss_weight != 0.0:
         raise ValueError(
             "llm_loss_weight is deprecated because prompt-prefix KL can bias the codec away from "
@@ -1024,6 +1038,9 @@ def train_temporal_lstm_autoencoder(
             "replay_loss_weight": replay_loss_weight,
             "replay_loss_steps": int(replay_loss_steps),
             "prompt_loss_weight": prompt_loss_weight,
+            "optimizer": "adamw",
+            "optimizer_eps": optimizer_eps,
+            "optimizer_foreach": bool(optimizer_foreach),
             "memory_gb": _current_memory_gb(),
         },
     )
@@ -1248,7 +1265,13 @@ def train_temporal_lstm_autoencoder(
     opt_params = list(model.parameters())
     if prompt_decoder is not None:
         opt_params.extend(prompt_decoder.parameters())
-    opt = torch.optim.AdamW(opt_params, lr=lr, weight_decay=weight_decay)
+    opt = torch.optim.AdamW(
+        opt_params,
+        lr=lr,
+        weight_decay=weight_decay,
+        eps=optimizer_eps,
+        foreach=bool(optimizer_foreach),
+    )
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
     if checkpoint_every > 0 and checkpoint_dir is not None:
@@ -1281,6 +1304,9 @@ def train_temporal_lstm_autoencoder(
         "resume_epoch": resume_epoch,
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+        "optimizer": "adamw",
+        "optimizer_eps": optimizer_eps,
+        "optimizer_foreach": bool(optimizer_foreach),
         "replay_loss_every_n_batches": int(replay_loss_every_n_batches),
         "prompt_loss_weight": prompt_loss_weight,
         "prompt_loss_max_tokens": int(prompt_loss_max_tokens) if prompt_loss_max_tokens is not None else None,
@@ -1498,6 +1524,45 @@ def train_temporal_lstm_autoencoder(
                     opt.zero_grad(set_to_none=True)
                 else:
                     opt.step()
+                    if not _parameters_are_finite(opt_params):
+                        bad_parameters = _nonfinite_parameter_names(
+                            [("model", model), ("prompt_decoder", prompt_decoder)]
+                        )
+                        _append_training_event(
+                            progress_path,
+                            {
+                                "event": "nonfinite_parameters_after_optimizer_step",
+                                "elapsed_s": time.perf_counter() - start,
+                                "epoch_elapsed_s": time.perf_counter() - epoch_start,
+                                "epoch": epoch,
+                                "epochs": epochs,
+                                "batch": batch_index,
+                                "batches": total_batches,
+                                "batch_start": batch_start,
+                                "batch_stop": batch_stop,
+                                "grad_norm": grad_norm_value,
+                                "loss": float(loss.detach().cpu()),
+                                "loss_components": {
+                                    "masked_temporal_reconstruction_mse": float(reconstruction_loss.detach().cpu()),
+                                    "masked_temporal_cosine_distance": float(cosine_loss.detach().cpu()),
+                                    "latent_pairwise_separation": float(latent_separation_loss.detach().cpu()),
+                                    "teacher_forced_generation_replay_kl": float(replay_loss.detach().cpu()),
+                                    "prompt_token_reconstruction_ce": float(prompt_loss.detach().cpu()),
+                                },
+                                "bad_parameter_count": len(bad_parameters),
+                                "bad_parameters": bad_parameters[:20],
+                                "optimizer": "adamw",
+                                "optimizer_eps": optimizer_eps,
+                                "optimizer_foreach": bool(optimizer_foreach),
+                                "memory_gb": _current_memory_gb(),
+                            },
+                        )
+                        raise FloatingPointError(
+                            "Optimizer step produced non-finite parameters "
+                            f"at epoch={epoch} batch={batch_index}; "
+                            f"bad_parameter_count={len(bad_parameters)} "
+                            f"first_bad_parameters={bad_parameters[:5]}"
+                        )
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())
                 cosine_loss_total += float(cosine_loss.detach().item())
@@ -1631,6 +1696,9 @@ def train_temporal_lstm_autoencoder(
                 "prompt_loss_compact_vocab": len(prompt_token_vocab),
                 "grad_clip_norm": float(grad_clip_norm),
                 "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+                "optimizer": "adamw",
+                "optimizer_eps": optimizer_eps,
+                "optimizer_foreach": bool(optimizer_foreach),
                 "weight_decay": weight_decay,
                 "train_batch_size": batch_size,
                 "memory_gb": mem_gb,
@@ -1687,6 +1755,9 @@ def train_temporal_lstm_autoencoder(
                     "prompt_loss_compact_vocab": len(prompt_token_vocab),
                     "grad_clip_norm": float(grad_clip_norm),
                     "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+                    "optimizer": "adamw",
+                    "optimizer_eps": optimizer_eps,
+                    "optimizer_foreach": bool(optimizer_foreach),
                     "weight_decay": weight_decay,
                     "temporal_codec_kind": temporal_codec_kind,
                     "chunk_size": getattr(model, "chunk_size", None),
@@ -1790,6 +1861,9 @@ def train_temporal_lstm_autoencoder(
         "resume_epoch": resume_epoch,
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+        "optimizer": "adamw",
+        "optimizer_eps": optimizer_eps,
+        "optimizer_foreach": bool(optimizer_foreach),
         "regularization": "adamw_weight_decay_only",
         "train_batch_size": batch_size,
         "decoder_conditioning": "chunk_latents_plus_learned_chunk_and_token_positions"
@@ -1868,6 +1942,8 @@ def run_compression(
     temporal_latent_tokens: int = 1,
     temporal_decoder_memory_tokens: int = 1,
     temporal_flatten_latent_tokens: bool = False,
+    optimizer_eps: float = 1e-6,
+    optimizer_foreach: bool = False,
 ) -> CompressionResult:
     cache_matrix = load_cache_matrix(run_dir)
     x = cache_matrix.matrix
@@ -1967,6 +2043,8 @@ def run_compression(
             temporal_latent_tokens=temporal_latent_tokens,
             temporal_decoder_memory_tokens=temporal_decoder_memory_tokens,
             temporal_flatten_latent_tokens=temporal_flatten_latent_tokens,
+            optimizer_eps=optimizer_eps,
+            optimizer_foreach=optimizer_foreach,
             checkpoint_stem=method,
         )
         mean = stats.pop("normalization_mean")

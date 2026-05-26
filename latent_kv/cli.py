@@ -232,6 +232,8 @@ def cmd_compress(args: argparse.Namespace) -> int:
         temporal_latent_tokens=args.temporal_latent_tokens,
         temporal_decoder_memory_tokens=args.temporal_decoder_memory_tokens,
         temporal_flatten_latent_tokens=args.temporal_flatten_latent_tokens,
+        optimizer_eps=args.optimizer_eps,
+        optimizer_foreach=args.optimizer_foreach,
     )
     metrics_path = run_dir / "metrics.json"
     payload = read_json(metrics_path) if metrics_path.exists() else {"baselines": [], "extra": {}}
@@ -774,6 +776,17 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--train-batch-size", type=int, default=0, help="Mini-batch size for rae_temporal training; 0 uses all records at once.")
     compress.add_argument("--resume-checkpoint", default=None, help="Resume rae_temporal model weights from a checkpoint and continue at checkpoint epoch + 1.")
     compress.add_argument("--grad-clip-norm", type=float, default=0.0, help="Optional gradient clipping norm for learned codecs; 0 disables clipping.")
+    compress.add_argument(
+        "--optimizer-eps",
+        type=float,
+        default=1e-6,
+        help="AdamW epsilon for learned codecs; larger than PyTorch default to reduce MPS late-step NaNs.",
+    )
+    compress.add_argument(
+        "--optimizer-foreach",
+        action="store_true",
+        help="Allow AdamW foreach kernels for learned codecs. Default is off for deterministic/stable MPS training.",
+    )
     compress.add_argument("--mps-empty-cache-every-batches", type=int, default=0, help="For MPS training, call torch.mps.empty_cache every N mini-batches; 0 disables.")
     compress.add_argument("--temporal-chunk-size", type=int, default=1, help="Token chunk size for the structured temporal RAE codec.")
     compress.add_argument("--temporal-num-heads", type=int, default=8, help="Attention heads for transformer temporal codecs.")

@@ -760,6 +760,53 @@ def test_temporal_rae_skips_finite_weight_nonfinite_forward_batch(tmp_path: Path
     assert epoch_rows[0]["skipped_forward_batches"] == 1
 
 
+def test_temporal_rae_reports_optimizer_parameter_corruption(tmp_path: Path, monkeypatch):
+    _write_run(tmp_path)
+    captured_kwargs = []
+
+    class CorruptingAdamW(torch.optim.SGD):
+        def __init__(self, params, **kwargs):
+            captured_kwargs.append(kwargs)
+            super().__init__(
+                params,
+                lr=kwargs["lr"],
+                weight_decay=kwargs.get("weight_decay", 0.0),
+            )
+
+        def step(self, closure=None):
+            result = super().step(closure)
+            with torch.no_grad():
+                self.param_groups[0]["params"][0].fill_(float("nan"))
+            return result
+
+    monkeypatch.setattr(torch.optim, "AdamW", CorruptingAdamW)
+
+    with pytest.raises(FloatingPointError, match="Optimizer step produced non-finite parameters"):
+        run_compression(
+            tmp_path,
+            method="rae_temporal_transformer",
+            latent_dim=4,
+            seed=0,
+            epochs=1,
+            hidden_dim=8,
+            num_layers=1,
+            train_batch_size=1,
+            grad_clip_norm=0.25,
+            temporal_num_heads=2,
+            temporal_latent_tokens=1,
+            optimizer_eps=1e-5,
+            optimizer_foreach=False,
+            log_every=1,
+        )
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_transformer_training.jsonl")
+    corruption_rows = [row for row in training_rows if row.get("event") == "nonfinite_parameters_after_optimizer_step"]
+
+    assert captured_kwargs[0]["eps"] == pytest.approx(1e-5)
+    assert captured_kwargs[0]["foreach"] is False
+    assert len(corruption_rows) == 1
+    assert corruption_rows[0]["bad_parameter_count"] >= 1
+
+
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
     _write_run(tmp_path)
 
