@@ -844,6 +844,51 @@ def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
     assert epoch_rows[0]["loss_components"]["prompt_token_reconstruction_ce"] > 0
 
 
+def test_temporal_rae_resumes_prompt_decoder_and_optimizer_state(tmp_path: Path):
+    _write_run(tmp_path)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        prompt_loss_weight=0.01,
+        prompt_loss_max_tokens=4,
+        prompt_loss_hidden_dim=16,
+        prompt_loss_num_layers=1,
+        prompt_loss_num_heads=4,
+        log_every=1,
+        checkpoint_every=1,
+    )
+    checkpoint = tmp_path / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=2,
+        hidden_dim=8,
+        prompt_loss_weight=0.01,
+        prompt_loss_max_tokens=4,
+        prompt_loss_hidden_dim=16,
+        prompt_loss_num_layers=1,
+        prompt_loss_num_heads=4,
+        log_every=1,
+        checkpoint_every=1,
+        resume_checkpoint_path=checkpoint,
+    )
+    artifact = torch.load(tmp_path / "compressions" / "rae_temporal_artifact.pt", map_location="cpu")
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+
+    assert artifact["resume_epoch"] == 1
+    assert artifact["resume_optimizer_state"] is True
+    assert artifact["resume_prompt_decoder_state"] is True
+    assert any(row.get("resume_prompt_decoder_state") is True for row in training_rows)
+
+
 def test_temporal_rae_reports_sampled_replay_kl_observations(tmp_path: Path, monkeypatch):
     _write_run(tmp_path)
     monkeypatch.setattr(compressors, "load_model_and_tokenizer", _fake_load_model_and_tokenizer)
@@ -944,6 +989,11 @@ def test_temporal_rae_can_resume_from_checkpoint(tmp_path: Path):
         log_every=1,
     )
     checkpoint = tmp_path / "compressions" / "rae_temporal_checkpoints" / "rae_temporal_epoch_000001.pt"
+    first_checkpoint = torch.load(checkpoint, map_location="cpu")
+
+    assert first_checkpoint["optimizer_state_saved"] is True
+    assert "optimizer_state_dict" in first_checkpoint
+    assert first_checkpoint["optimizer_state_dict"]["state"]
 
     run_compression(
         tmp_path,
@@ -967,7 +1017,9 @@ def test_temporal_rae_can_resume_from_checkpoint(tmp_path: Path):
     assert latest["grad_clip_norm"] == 1.0
     assert artifact["resume_epoch"] == 1
     assert artifact["resume_checkpoint_path"] == str(checkpoint)
+    assert artifact["resume_optimizer_state"] is True
     assert any(row.get("resume_epoch") == 1 for row in training_rows)
+    assert any(row.get("resume_optimizer_state") is True for row in training_rows)
 
 
 def test_temporal_rae_can_train_in_mini_batches(tmp_path: Path):

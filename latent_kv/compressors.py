@@ -395,6 +395,25 @@ def _atomic_torch_save(payload: Any, path: Path) -> None:
     tmp_path.replace(path)
 
 
+def _tensor_tree_to_cpu(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _tensor_tree_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_tensor_tree_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_tensor_tree_to_cpu(item) for item in value)
+    return value
+
+
+def _move_optimizer_state_to_device(opt: torch.optim.Optimizer, device: torch.device) -> None:
+    for state in opt.state.values():
+        for key, value in list(state.items()):
+            if isinstance(value, torch.Tensor):
+                state[key] = value.to(device)
+
+
 def _current_memory_gb() -> float:
     try:
         import psutil
@@ -1115,18 +1134,19 @@ def train_temporal_lstm_autoencoder(
         },
     )
     resume_epoch = 0
+    resume_checkpoint: dict[str, Any] | None = None
     if resume_checkpoint_path is not None:
-        checkpoint = torch.load(resume_checkpoint_path, map_location="cpu")
-        checkpoint_seq_len = int(checkpoint.get("seq_len", sequence.shape[1]))
-        checkpoint_token_dim = int(checkpoint.get("token_dim", sequence.shape[-1]))
+        resume_checkpoint = torch.load(resume_checkpoint_path, map_location="cpu")
+        checkpoint_seq_len = int(resume_checkpoint.get("seq_len", sequence.shape[1]))
+        checkpoint_token_dim = int(resume_checkpoint.get("token_dim", sequence.shape[-1]))
         if checkpoint_seq_len != int(sequence.shape[1]) or checkpoint_token_dim != int(sequence.shape[-1]):
             raise ValueError(
                 "Resume checkpoint shape does not match current temporal matrix: "
                 f"checkpoint seq/token=({checkpoint_seq_len}, {checkpoint_token_dim}) "
                 f"current=({sequence.shape[1]}, {sequence.shape[-1]})"
             )
-        model.load_state_dict(checkpoint["state_dict"])
-        resume_epoch = int(checkpoint.get("epoch") or 0)
+        model.load_state_dict(resume_checkpoint["state_dict"])
+        resume_epoch = int(resume_checkpoint.get("epoch") or 0)
         print(f"[rae_temporal] Resumed model weights from epoch {resume_epoch}: {resume_checkpoint_path}", flush=True)
     llm = None
     tokenizer = None
@@ -1218,6 +1238,7 @@ def train_temporal_lstm_autoencoder(
     prompt_target_mask = None
     prompt_token_vocab: list[int] = []
     prompt_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    resume_prompt_decoder_state = False
     if prompt_loss_weight > 0:
         print("[rae_temporal] Preparing token-level prompt auxiliary loss...", flush=True)
         _append_training_event(
@@ -1246,6 +1267,16 @@ def train_temporal_lstm_autoencoder(
             num_layers=int(prompt_loss_num_layers),
             num_heads=int(prompt_loss_num_heads),
         ).to(training_device)
+        if resume_checkpoint is not None:
+            prompt_decoder_state = resume_checkpoint.get("prompt_decoder_state_dict")
+            if prompt_decoder_state is None and float(resume_checkpoint.get("prompt_loss_weight") or 0.0) > 0.0:
+                raise ValueError(
+                    "Resume checkpoint is missing prompt_decoder_state_dict for a run that used prompt loss. "
+                    "Restart from scratch or resume from a checkpoint saved with prompt decoder state."
+                )
+            if prompt_decoder_state is not None:
+                prompt_decoder.load_state_dict(prompt_decoder_state)
+                resume_prompt_decoder_state = True
         print(
             "[rae_temporal] Prompt auxiliary targets loaded: "
             f"prompt_tokens={prompt_targets.shape[1]} compact_vocab={len(prompt_token_vocab)} "
@@ -1272,6 +1303,29 @@ def train_temporal_lstm_autoencoder(
         eps=optimizer_eps,
         foreach=bool(optimizer_foreach),
     )
+    resume_optimizer_state = False
+    if resume_checkpoint is not None:
+        optimizer_state = resume_checkpoint.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            opt.load_state_dict(optimizer_state)
+            _move_optimizer_state_to_device(opt, training_device)
+            resume_optimizer_state = True
+            print("[rae_temporal] Resumed AdamW optimizer state.", flush=True)
+        elif resume_epoch > 0:
+            print(
+                "[rae_temporal] Resume checkpoint has no optimizer state; continuing with fresh AdamW moments.",
+                flush=True,
+            )
+            _append_training_event(
+                progress_path,
+                {
+                    "event": "resume_optimizer_state_missing",
+                    "elapsed_s": time.perf_counter() - setup_start,
+                    "resume_epoch": resume_epoch,
+                    "resume_checkpoint_path": str(resume_checkpoint_path),
+                    "memory_gb": _current_memory_gb(),
+                },
+            )
     history: list[dict[str, Any]] = []
     start = time.perf_counter()
     if checkpoint_every > 0 and checkpoint_dir is not None:
@@ -1302,6 +1356,8 @@ def train_temporal_lstm_autoencoder(
         "heartbeat_every_batches": heartbeat_every_batches,
         "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
         "resume_epoch": resume_epoch,
+        "resume_optimizer_state": resume_optimizer_state,
+        "resume_prompt_decoder_state": resume_prompt_decoder_state,
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "optimizer": "adamw",
@@ -1758,7 +1814,11 @@ def train_temporal_lstm_autoencoder(
                     "optimizer": "adamw",
                     "optimizer_eps": optimizer_eps,
                     "optimizer_foreach": bool(optimizer_foreach),
+                    "optimizer_state_saved": True,
+                    "optimizer_state_dict": _tensor_tree_to_cpu(opt.state_dict()),
                     "weight_decay": weight_decay,
+                    "resume_optimizer_state": resume_optimizer_state,
+                    "resume_prompt_decoder_state": resume_prompt_decoder_state,
                     "temporal_codec_kind": temporal_codec_kind,
                     "chunk_size": getattr(model, "chunk_size", None),
                     "temporal_num_heads": getattr(model, "num_heads", None),
@@ -1859,6 +1919,8 @@ def train_temporal_lstm_autoencoder(
         else None,
         "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
         "resume_epoch": resume_epoch,
+        "resume_optimizer_state": resume_optimizer_state,
+        "resume_prompt_decoder_state": resume_prompt_decoder_state,
         "grad_clip_norm": float(grad_clip_norm),
         "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
         "optimizer": "adamw",
