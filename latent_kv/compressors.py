@@ -447,6 +447,16 @@ def _parameters_are_finite(parameters: list[nn.Parameter]) -> bool:
     return True
 
 
+def _snapshot_parameter_values(parameters: list[nn.Parameter]) -> dict[nn.Parameter, torch.Tensor]:
+    return {parameter: parameter.detach().clone() for parameter in parameters}
+
+
+def _restore_parameter_values(snapshot: dict[nn.Parameter, torch.Tensor]) -> None:
+    with torch.no_grad():
+        for parameter, value in snapshot.items():
+            parameter.copy_(value)
+
+
 def _nonfinite_parameter_names(modules: list[tuple[str, nn.Module | None]]) -> list[str]:
     names = []
     for module_name, module in modules:
@@ -1579,15 +1589,22 @@ def train_temporal_lstm_autoencoder(
                     )
                     opt.zero_grad(set_to_none=True)
                 else:
+                    pre_step_parameter_snapshot = _snapshot_parameter_values(opt_params)
                     opt.step()
                     if not _parameters_are_finite(opt_params):
                         bad_parameters = _nonfinite_parameter_names(
                             [("model", model), ("prompt_decoder", prompt_decoder)]
                         )
+                        _restore_parameter_values(pre_step_parameter_snapshot)
+                        opt.state.clear()
+                        opt.zero_grad(set_to_none=True)
+                        skipped_optimizer_steps += 1
+                        restored_parameters_finite = _parameters_are_finite(opt_params)
                         _append_training_event(
                             progress_path,
                             {
                                 "event": "nonfinite_parameters_after_optimizer_step",
+                                "action": "restored_parameters_reset_optimizer_state_skipped_batch",
                                 "elapsed_s": time.perf_counter() - start,
                                 "epoch_elapsed_s": time.perf_counter() - epoch_start,
                                 "epoch": epoch,
@@ -1607,17 +1624,25 @@ def train_temporal_lstm_autoencoder(
                                 },
                                 "bad_parameter_count": len(bad_parameters),
                                 "bad_parameters": bad_parameters[:20],
+                                "restored_parameters_finite": restored_parameters_finite,
+                                "optimizer_state_reset": "all",
                                 "optimizer": "adamw",
                                 "optimizer_eps": optimizer_eps,
                                 "optimizer_foreach": bool(optimizer_foreach),
                                 "memory_gb": _current_memory_gb(),
                             },
                         )
-                        raise FloatingPointError(
-                            "Optimizer step produced non-finite parameters "
-                            f"at epoch={epoch} batch={batch_index}; "
-                            f"bad_parameter_count={len(bad_parameters)} "
-                            f"first_bad_parameters={bad_parameters[:5]}"
+                        if not restored_parameters_finite:
+                            raise FloatingPointError(
+                                "Optimizer step produced non-finite parameters and rollback failed "
+                                f"at epoch={epoch} batch={batch_index}; "
+                                f"bad_parameter_count={len(bad_parameters)} "
+                                f"first_bad_parameters={bad_parameters[:5]}"
+                            )
+                        print(
+                            f"[rae_temporal epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                            "reverted non-finite optimizer step; reset AdamW state and skipped batch",
+                            flush=True,
                         )
                 reconstruction_numerator += float((reconstruction_loss.detach() * batch_denominator).item())
                 denominator_total += float(batch_denominator.detach().item())

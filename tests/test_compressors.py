@@ -781,30 +781,34 @@ def test_temporal_rae_reports_optimizer_parameter_corruption(tmp_path: Path, mon
 
     monkeypatch.setattr(torch.optim, "AdamW", CorruptingAdamW)
 
-    with pytest.raises(FloatingPointError, match="Optimizer step produced non-finite parameters"):
-        run_compression(
-            tmp_path,
-            method="rae_temporal_transformer",
-            latent_dim=4,
-            seed=0,
-            epochs=1,
-            hidden_dim=8,
-            num_layers=1,
-            train_batch_size=1,
-            grad_clip_norm=0.25,
-            temporal_num_heads=2,
-            temporal_latent_tokens=1,
-            optimizer_eps=1e-5,
-            optimizer_foreach=False,
-            log_every=1,
-        )
+    run_compression(
+        tmp_path,
+        method="rae_temporal_transformer",
+        latent_dim=4,
+        seed=0,
+        epochs=1,
+        hidden_dim=8,
+        num_layers=1,
+        train_batch_size=1,
+        grad_clip_norm=0.25,
+        temporal_num_heads=2,
+        temporal_latent_tokens=1,
+        optimizer_eps=1e-5,
+        optimizer_foreach=False,
+        log_every=1,
+    )
     training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_transformer_training.jsonl")
     corruption_rows = [row for row in training_rows if row.get("event") == "nonfinite_parameters_after_optimizer_step"]
+    epoch_rows = [row for row in training_rows if row.get("method") == "rae_temporal"]
 
     assert captured_kwargs[0]["eps"] == pytest.approx(1e-5)
     assert captured_kwargs[0]["foreach"] is False
-    assert len(corruption_rows) == 1
+    assert len(corruption_rows) == 2
     assert corruption_rows[0]["bad_parameter_count"] >= 1
+    assert corruption_rows[0]["action"] == "restored_parameters_reset_optimizer_state_skipped_batch"
+    assert corruption_rows[0]["restored_parameters_finite"] is True
+    assert corruption_rows[0]["optimizer_state_reset"] == "all"
+    assert epoch_rows[0]["skipped_optimizer_steps"] == 2
 
 
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
