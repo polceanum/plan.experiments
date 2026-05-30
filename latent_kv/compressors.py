@@ -1414,11 +1414,54 @@ def train_temporal_lstm_autoencoder(
             for batch_index, batch_start in enumerate(range(0, int(normalized.shape[0]), batch_size), start=1):
                 batch_stop = min(batch_start + batch_size, int(normalized.shape[0]))
                 batch_indices = epoch_indices[batch_start:batch_stop]
-                batch_normalized = normalized[batch_indices].to(training_device)
+                opt.zero_grad(set_to_none=True)
+                batch_normalized_source = normalized[batch_indices]
+                source_input_finite = bool(torch.isfinite(batch_normalized_source).all().item())
+                if not source_input_finite:
+                    raise FloatingPointError(
+                        "Non-finite source training input at "
+                        f"epoch={epoch} batch={batch_index}; batch_start={batch_start} batch_stop={batch_stop}"
+                    )
+                batch_normalized = batch_normalized_source.to(training_device)
+                if not bool(torch.isfinite(batch_normalized).all().detach().cpu().item()):
+                    del batch_normalized
+                    if mps_empty_cache_every_batches > 0:
+                        gc.collect()
+                        _empty_device_cache(training_device)
+                    batch_normalized = batch_normalized_source.clone().to(training_device)
+                if not bool(torch.isfinite(batch_normalized).all().detach().cpu().item()):
+                    skipped_forward_batches += 1
+                    _append_training_event(
+                        progress_path,
+                        {
+                            "event": "nonfinite_forward_skipped",
+                            "stage": "input_transfer",
+                            "elapsed_s": time.perf_counter() - start,
+                            "epoch_elapsed_s": time.perf_counter() - epoch_start,
+                            "epoch": epoch,
+                            "epochs": epochs,
+                            "batch": batch_index,
+                            "batches": total_batches,
+                            "batch_start": batch_start,
+                            "batch_stop": batch_stop,
+                            "source_input_finite": source_input_finite,
+                            "input_finite": False,
+                            "parameters_finite": _parameters_are_finite(opt_params),
+                            "skipped_forward_batches": skipped_forward_batches,
+                            "skipped_optimizer_steps": skipped_optimizer_steps,
+                            "memory_gb": _current_memory_gb(),
+                        },
+                    )
+                    print(
+                        f"[rae_temporal epoch {epoch}/{epochs} batch {batch_index}/{total_batches}] "
+                        "skipped batch due to non-finite device input after transfer",
+                        flush=True,
+                    )
+                    del batch_normalized, batch_normalized_source, batch_indices
+                    continue
                 batch_token_mask = token_mask[batch_indices].to(training_device)
                 batch_feature_mask = feature_mask[batch_indices].to(training_device)
                 batch_denominator = (batch_feature_mask.sum() * sequence.shape[-1]).clamp_min(1.0)
-                opt.zero_grad(set_to_none=True)
                 z = model.encode(batch_normalized, token_mask=batch_token_mask)
                 reconstructed_norm = model.decode(z)
                 reconstruction_loss = (((reconstructed_norm - batch_normalized) ** 2) * batch_feature_mask).sum() / batch_denominator
@@ -1497,10 +1540,10 @@ def train_temporal_lstm_autoencoder(
                     latent_finite = bool(torch.isfinite(z).all().detach().cpu().item())
                     reconstruction_finite = bool(torch.isfinite(reconstructed_norm).all().detach().cpu().item())
                     parameters_finite = _parameters_are_finite(opt_params)
-                    if not input_finite or not parameters_finite:
+                    if not source_input_finite or not parameters_finite:
                         raise FloatingPointError(
                             "Non-finite training loss with non-finite "
-                            f"{'input' if not input_finite else 'parameters'} "
+                            f"{'source input' if not source_input_finite else 'parameters'} "
                             f"at epoch={epoch} batch={batch_index}: "
                             f"mse={loss_components['masked_temporal_reconstruction_mse']} "
                             f"cosine={loss_components['masked_temporal_cosine_distance']} "
@@ -1522,6 +1565,7 @@ def train_temporal_lstm_autoencoder(
                             "batch_start": batch_start,
                             "batch_stop": batch_stop,
                             "loss_components": loss_components,
+                            "source_input_finite": source_input_finite,
                             "input_finite": input_finite,
                             "latent_finite": latent_finite,
                             "reconstruction_finite": reconstruction_finite,
@@ -1538,7 +1582,7 @@ def train_temporal_lstm_autoencoder(
                         flush=True,
                     )
                     opt.zero_grad(set_to_none=True)
-                    del batch_normalized, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
+                    del batch_normalized, batch_normalized_source, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
                     if mps_empty_cache_every_batches > 0:
                         gc.collect()
                         _empty_device_cache(training_device)
@@ -1710,7 +1754,7 @@ def train_temporal_lstm_autoencoder(
                         f"elapsed={heartbeat['elapsed_s']:.1f}s",
                         flush=True,
                     )
-                del batch_normalized, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
+                del batch_normalized, batch_normalized_source, batch_token_mask, batch_feature_mask, batch_indices, z, reconstructed_norm, reconstruction_loss, cosine_loss, latent_separation_loss, replay_loss, prompt_loss, loss
                 if mps_empty_cache_every_batches > 0 and batch_index % int(mps_empty_cache_every_batches) == 0:
                     gc.collect()
                     _empty_device_cache(training_device)
