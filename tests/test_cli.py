@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from latent_kv.cli import main
 
 
@@ -182,6 +185,64 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--temporal-latent-tokens" in out
     assert "--temporal-decoder-memory-tokens" in out
     assert "rae_temporal_transformer" in out
+
+
+def test_compress_autoresume_help_lists_restart_controls(capsys):
+    try:
+        main(["compress-autoresume", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "--max-restarts" in out
+    assert "--restart-delay-s" in out
+    assert "latest numbered checkpoint" in out
+
+
+def test_compress_autoresume_uses_latest_numbered_checkpoint(tmp_path: Path, monkeypatch):
+    checkpoint_dir = tmp_path / "compressions" / "rae_temporal_transformer_checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "rae_temporal_transformer_epoch_000010.pt").write_text("old", encoding="utf-8")
+    (checkpoint_dir / "rae_temporal_transformer_epoch_000025.pt").write_text("new", encoding="utf-8")
+    (checkpoint_dir / "rae_temporal_transformer_latest.pt").write_text("alias", encoding="utf-8")
+    calls = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(command):
+        calls.append(command)
+        return Completed()
+
+    monkeypatch.setattr("latent_kv.cli.subprocess.run", fake_run)
+
+    assert main(
+        [
+            "compress-autoresume",
+            "--restart-delay-s",
+            "0",
+            "--",
+            "--run",
+            str(tmp_path),
+            "--method",
+            "rae_temporal_transformer",
+            "--epochs",
+            "100",
+            "--resume-checkpoint",
+            "stale.pt",
+        ]
+    ) == 0
+
+    command = calls[0]
+    assert command[:3][-2:] == ["-m", "latent_kv"]
+    assert "--resume-checkpoint" in command
+    resume_index = command.index("--resume-checkpoint")
+    assert command[resume_index + 1].endswith("rae_temporal_transformer_epoch_000025.pt")
+    assert "stale.pt" not in command
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "run_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "compress_autoresume_attempt_start" for event in events)
 
 
 def test_attach_prompt_caches_help_lists_source_records(capsys):

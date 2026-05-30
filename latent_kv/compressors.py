@@ -448,13 +448,13 @@ def _parameters_are_finite(parameters: list[nn.Parameter]) -> bool:
 
 
 def _snapshot_parameter_values(parameters: list[nn.Parameter]) -> dict[nn.Parameter, torch.Tensor]:
-    return {parameter: parameter.detach().clone() for parameter in parameters}
+    return {parameter: parameter.detach().cpu().clone() for parameter in parameters}
 
 
 def _restore_parameter_values(snapshot: dict[nn.Parameter, torch.Tensor]) -> None:
     with torch.no_grad():
         for parameter, value in snapshot.items():
-            parameter.copy_(value)
+            parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
 
 
 def _nonfinite_parameter_names(modules: list[tuple[str, nn.Module | None]]) -> list[str]:
@@ -1669,6 +1669,7 @@ def train_temporal_lstm_autoencoder(
                                 "bad_parameter_count": len(bad_parameters),
                                 "bad_parameters": bad_parameters[:20],
                                 "restored_parameters_finite": restored_parameters_finite,
+                                "rollback_snapshot_device": "cpu",
                                 "optimizer_state_reset": "all",
                                 "optimizer": "adamw",
                                 "optimizer_eps": optimizer_eps,

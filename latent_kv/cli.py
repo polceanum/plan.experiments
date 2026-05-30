@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -244,6 +245,121 @@ def cmd_compress(args: argparse.Namespace) -> int:
     evaluate_run(run_dir, baseline="no_cache")
     print(f"{result.method}: mse={result.reconstruction_mse:.6g}, latents={result.latent_path}")
     return 0
+
+
+def _strip_option_with_value(argv: Sequence[str], option: str) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == option:
+            skip_next = True
+            continue
+        if item.startswith(f"{option}="):
+            continue
+        stripped.append(item)
+    return stripped
+
+
+def _option_value(argv: Sequence[str], option: str) -> str | None:
+    for idx, item in enumerate(argv):
+        if item == option and idx + 1 < len(argv):
+            return argv[idx + 1]
+        if item.startswith(f"{option}="):
+            return item.split("=", 1)[1]
+    return None
+
+
+def _checkpoint_epoch(path: Path, method: str) -> int | None:
+    match = re.fullmatch(rf"{re.escape(method)}_epoch_(\d+)\.pt", path.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _latest_numbered_checkpoint(run_dir: Path, method: str) -> Path | None:
+    checkpoint_dir = run_dir / "compressions" / f"{method}_checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for path in checkpoint_dir.glob(f"{method}_epoch_*.pt"):
+        epoch = _checkpoint_epoch(path, method)
+        if epoch is not None:
+            candidates.append((epoch, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def cmd_compress_autoresume(args: argparse.Namespace) -> int:
+    compress_args = list(args.compress_args)
+    if compress_args and compress_args[0] == "--":
+        compress_args = compress_args[1:]
+    if compress_args and compress_args[0] == "compress":
+        compress_args = compress_args[1:]
+    compress_args = _strip_option_with_value(compress_args, "--resume-checkpoint")
+
+    run_value = _option_value(compress_args, "--run")
+    if run_value is None:
+        raise SystemExit("compress-autoresume requires a compress argument list containing --run")
+    method = _option_value(compress_args, "--method") or "random"
+    run_dir = Path(run_value)
+    max_restarts = max(int(args.max_restarts), 0)
+    restart_delay_s = max(float(args.restart_delay_s), 0.0)
+    last_exit_code = 1
+
+    for attempt in range(max_restarts + 1):
+        checkpoint = _latest_numbered_checkpoint(run_dir, method)
+        child_args = ["compress", *compress_args]
+        if checkpoint is not None:
+            child_args.extend(["--resume-checkpoint", str(checkpoint)])
+        command = [sys.executable, "-m", "latent_kv", *child_args]
+        _append_run_event(
+            run_dir,
+            {
+                "event": "compress_autoresume_attempt_start",
+                "attempt": attempt,
+                "max_restarts": max_restarts,
+                "method": method,
+                "resume_checkpoint": str(checkpoint) if checkpoint is not None else None,
+                "argv": command[3:],
+                "pid": os.getpid(),
+            },
+        )
+        completed = subprocess.run(command)
+        last_exit_code = int(completed.returncode)
+        _append_run_event(
+            run_dir,
+            {
+                "event": "compress_autoresume_attempt_finish",
+                "attempt": attempt,
+                "max_restarts": max_restarts,
+                "method": method,
+                "resume_checkpoint": str(checkpoint) if checkpoint is not None else None,
+                "exit_code": last_exit_code,
+                "pid": os.getpid(),
+            },
+        )
+        if last_exit_code == 0:
+            return 0
+        if attempt >= max_restarts:
+            break
+        _append_run_event(
+            run_dir,
+            {
+                "event": "compress_autoresume_restart_sleep",
+                "attempt": attempt,
+                "next_attempt": attempt + 1,
+                "restart_delay_s": restart_delay_s,
+                "last_exit_code": last_exit_code,
+                "pid": os.getpid(),
+            },
+        )
+        time.sleep(restart_delay_s)
+
+    return last_exit_code or 1
 
 
 def _write_basic_plots(run_dir: Path) -> None:
@@ -803,6 +919,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Flatten multiple transformer latent tokens into one stored interpolation point.",
     )
     compress.set_defaults(func=cmd_compress)
+
+    compress_autoresume = sub.add_parser(
+        "compress-autoresume",
+        help="Run compress and restart from the latest numbered checkpoint after failures",
+        description="Run compress and restart from the latest numbered checkpoint after failures.",
+    )
+    compress_autoresume.add_argument(
+        "--max-restarts",
+        type=int,
+        default=100000,
+        help="Maximum failed compress attempts to restart after the initial attempt.",
+    )
+    compress_autoresume.add_argument(
+        "--restart-delay-s",
+        type=float,
+        default=30.0,
+        help="Seconds to wait before restarting a failed compress attempt.",
+    )
+    compress_autoresume.add_argument(
+        "compress_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments for the compress command. Put them after --, for example: -- --run runs/x --method rae_temporal_transformer.",
+    )
+    compress_autoresume.set_defaults(func=cmd_compress_autoresume)
 
     inject = sub.add_parser("inject", help="Validate or replay a saved cache bundle")
     inject.add_argument("--cache", required=True)

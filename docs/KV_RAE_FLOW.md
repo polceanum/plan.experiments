@@ -578,6 +578,22 @@ This keeps final task correctness out of the loss while adding gradients that
 are closer to the behavioural question: whether the reconstructed cache drives
 the frozen local LLM through the same reasoning-token transitions.
 
+## Long-Run Recovery
+
+Long MPS runs should be launched through `compress-autoresume` rather than a
+fixed `compress --resume-checkpoint ...` command. The wrapper starts the same
+compression job, and after any non-zero exit it re-scans
+`runs/<run>/compressions/<method>_checkpoints/` for the latest complete numbered
+checkpoint before restarting. This matters because a static launchd command can
+keep returning to an old checkpoint even after the run has advanced.
+
+Optimizer-step rollbacks use CPU-backed parameter snapshots. MPS-side snapshots
+can be poisoned by the same non-finite optimizer event that corrupts live
+parameters, so CPU snapshots are slower but give the in-process recovery path a
+clean source of truth. If a process still exits, the autoresume wrapper should
+restart from the last numbered checkpoint instead of relying on the failed
+in-memory state.
+
 ## Variable Source Lengths
 
 Plan/cache sequences keep their original token lengths. Different prompts and

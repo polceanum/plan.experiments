@@ -1042,3 +1042,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Run the full solved498 transformer point-codec from scratch with temporal_latent_tokens=8, flattened latents, decoder_memory_tokens=16, train_batch_size=2, MSE plus cosine plus staged latent separation; analyze early checkpoints before adding replay KL or prompt CE.
+
+## 2026-05-30 - Make temporal RAE optimizer failures autoresumable
+
+### Worked
+
+- Added CPU-backed optimizer rollback snapshots so non-finite MPS optimizer steps can restore from a clean parameter copy, and added compress-autoresume to restart compression jobs from the latest complete numbered checkpoint after failures.
+
+### Did Not Work / Caveats
+
+- The failed transformer replay run reached epoch 325 but rollback from an MPS-side snapshot was not reliable; future launches should use the autoresume wrapper rather than a static --resume-checkpoint argument.
+
+### Left To Do
+
+- Relaunch the transformer flat8 replay-s2 run under compress-autoresume from the latest clean checkpoint and monitor run_events for restart attempts.

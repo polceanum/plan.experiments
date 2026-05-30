@@ -846,8 +846,23 @@ def test_temporal_rae_reports_optimizer_parameter_corruption(tmp_path: Path, mon
     assert corruption_rows[0]["bad_parameter_count"] >= 1
     assert corruption_rows[0]["action"] == "restored_parameters_reset_optimizer_state_skipped_batch"
     assert corruption_rows[0]["restored_parameters_finite"] is True
+    assert corruption_rows[0]["rollback_snapshot_device"] == "cpu"
     assert corruption_rows[0]["optimizer_state_reset"] == "all"
     assert epoch_rows[0]["skipped_optimizer_steps"] == 2
+
+
+def test_optimizer_rollback_snapshot_is_cpu_backed():
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    snapshot = compressors._snapshot_parameter_values([parameter])
+
+    assert snapshot[parameter].device.type == "cpu"
+
+    with torch.no_grad():
+        parameter.fill_(float("nan"))
+    compressors._restore_parameter_values(snapshot)
+
+    assert torch.isfinite(parameter).all()
+    assert parameter.detach().tolist() == [1.0, 2.0]
 
 
 def test_temporal_rae_can_use_prompt_token_auxiliary_gradients(tmp_path: Path):
