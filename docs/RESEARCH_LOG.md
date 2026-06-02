@@ -1056,3 +1056,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Relaunch the transformer flat8 replay-s2 run under compress-autoresume from the latest clean checkpoint and monitor run_events for restart attempts.
+
+## 2026-06-02 - Analyze transformer flat8 replay checkpoint 475
+
+### Worked
+
+- Generated epoch-475 latent/PCA artifacts for the active transformer flat8 replay-s2 run. Training from epoch 321 to 480 is monotonic non-increasing, reaching loss 0.111739 with MSE 0.106188 and cosine 0.055475. PCA over 498 solved trajectories uses an effective 4096-d flattened point and is not dominated by one axis (PC1 3.36%, PC2 1.91%), suggesting the latent space is less collapsed. A CPU interpolation smoke produced valid finite decoded caches and showed qualitatively sensible endpoint-to-endpoint topic drift. A 4-endpoint CPU reconstruction scan with 256-token budget solved 1/4 and produced coherent but often fact-drifted reasoning.
+
+### Did Not Work / Caveats
+
+- A 24-endpoint CPU reconstruction scan did not produce rows quickly enough while the MPS training run was active and was stopped. Short 24-token interpolation rows were all truncated, so they verify decode/replay plumbing but not solved interpolation quality.
+
+### Left To Do
+
+- Re-run a larger reconstruction/interpolation replay sweep from a later checkpoint or during a quieter window, with enough token budget to avoid truncation; use solved/convincing reconstructions as interpolation endpoints.
