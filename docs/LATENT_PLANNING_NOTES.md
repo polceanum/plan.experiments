@@ -22,6 +22,11 @@ properties while producing novel valid candidates.
   track plan length, reasoning length, action/operator distributions, solution
   trajectories, verification behaviour, and distance/diversity between
   generated outputs.
+- Interpolated latent points may define their own valid tasks. For middle
+  points between two solved examples, success does not require answering either
+  endpoint's dataset label. A strong interpolation can instead decode to a
+  coherent invented or mutated problem plus a reasoning trace that correctly
+  solves that problem.
 - Use automatic filtering. Generated latent states may be noisy; it is acceptable
   to sample many candidates, replay/score them, and keep only candidates that
   satisfy behavioural and structural filters.
@@ -52,6 +57,11 @@ Add or preserve these metric families where possible:
   tool-call distributions, verifier/correction phrase distributions.
 - **Diversity**: pairwise edit distance or embedding distance across generated
   solutions.
+- **Interpolation task/solution validity**: for middle-alpha samples, judge
+  whether there is an implied or recovered problem, whether the plan solves that
+  problem, and whether the problem/solution pair is novel rather than a direct
+  endpoint copy. Endpoint-target correctness is a reconstruction diagnostic, not
+  the primary metric for interpolated samples.
 - **Protocol robustness**: average and standard deviation across seeds, fixed
   sample budgets, and fixed benchmark slices.
 

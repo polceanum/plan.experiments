@@ -513,6 +513,24 @@ their outputs should be inspected for coherence, completeness, arithmetic
 self-consistency, and structural drift rather than forced agreement with either
 endpoint answer.
 
+For interpolation, the desired outcome is not "alpha solves endpoint A" or
+"alpha solves endpoint B." The desired outcome is:
+
+```text
+interpolated latent point
+  -> a coherent recovered or implied problem
+  -> a coherent reasoning plan
+  -> a correct solution to that recovered/implied problem
+```
+
+It is scientifically acceptable, and in fact interesting, for a middle point to
+solve an invented or mutated task as long as the task is well-formed and the
+solution follows from it. Endpoint-target accuracy remains useful for endpoint
+reconstruction checks, but it is the wrong primary metric for interpreting
+middle-alpha samples. Middle-alpha reports should instead judge problem
+coherence, plan coherence, task/plan alignment, arithmetic correctness,
+completion, novelty relative to endpoints, and cache validity.
+
 This endpoint-context replay is an implementation limitation of the prompt-cache
 path: an interpolated prompt-state cache needs a prompt/logit context to become
 text. Conceptually, the latent line is still A -> alpha points -> B. If the same
