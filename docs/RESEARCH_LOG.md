@@ -1070,3 +1070,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - Re-run a larger reconstruction/interpolation replay sweep from a later checkpoint or during a quieter window, with enough token budget to avoid truncation; use solved/convincing reconstructions as interpolation endpoints.
+
+## 2026-06-03 - Analyze transformer flat8 replay checkpoint 535
+
+### Worked
+
+- Generated epoch-535 latent/PCA artifacts for the active transformer flat8 replay-s2 run. Training remains monotonic after autoresume with 216 epoch points from epoch 321 to 536, reaching loss 0.110521 with MSE about 0.105031 and cosine about 0.054856. PCA over 498 solved trajectories remains diffuse with effective 4096-d flattened points; PC1 explains 3.02% and PC2 2.54%. Ran a high-tail cross-category interpolation sweep at cosine distance >=0.045 using 2 distant pairs and 5 alphas; all 20 decoded caches were finite/replay-compatible, 19/20 rows were inspectable, and 3/20 were flagged potentially solved.
+
+### Did Not Work / Caveats
+
+- The generated distant interpolation rows still show fact drift and usually do not solve endpoint targets; they are useful qualitative latent-line examples, not evidence of reliable task reconstruction. A small CPU reconstruction scan at epoch 535 did not produce rows quickly enough while active MPS training continued and was stopped.
+
+### Left To Do
+
+- For behavioural scoring, run reconstruction/interpolation replay in a quieter window or from a finished artifact; prioritize enough token budget and endpoints selected from convincing reconstructions.
