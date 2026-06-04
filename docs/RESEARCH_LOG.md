@@ -1084,3 +1084,17 @@ short and concrete so they can be updated after every run.
 ### Left To Do
 
 - For behavioural scoring, run reconstruction/interpolation replay in a quieter window or from a finished artifact; prioritize enough token budget and endpoints selected from convincing reconstructions.
+
+## 2026-06-04 - Analyze transformer flat8 replay checkpoint 585
+
+### Worked
+
+- Checkpoint 585 latent analysis encoded all 498 solved trajectories, produced PCA plots/CSV, and confirmed continued monotonic training through epoch 588. A distant cross-category interpolation sweep on CPU produced 20 replay rows with zero replay failures; 19 were inspectable and 6 were heuristic potentially solved candidate problem/solution traces.
+
+### Did Not Work / Caveats
+
+- The 160-token distant interpolation still truncated 13 of 20 rows, so human interpretation remains limited for longer plans. PCA shows a continuous category-enriched manifold rather than separated task clusters, and endpoint-target accuracy is still only an endpoint diagnostic for middle alpha points.
+
+### Left To Do
+
+- Repeat the distant interpolation sweep once newer checkpoints are available, preferably with a higher token budget or streaming row writes so long CPU replays are easier to monitor. Add manual validity review for invented/mutated interpolation tasks, checking both recovered problem soundness and solution arithmetic.
