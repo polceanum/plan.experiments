@@ -217,6 +217,8 @@ def cmd_compress(args: argparse.Namespace) -> int:
         latent_separation_margin=args.latent_separation_margin,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
+        checkpoint_keep_last=args.checkpoint_keep_last,
+        checkpoint_keep_every=args.checkpoint_keep_every,
         heartbeat_every_batches=args.heartbeat_every_batches,
         train_batch_size=args.train_batch_size,
         resume_checkpoint_path=Path(args.resume_checkpoint) if args.resume_checkpoint else None,
@@ -883,6 +885,8 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--prompt-loss-num-heads", type=int, default=8, help="Attention heads for the auxiliary latent prompt decoder.")
     compress.add_argument("--log-every", type=int, default=1, help="Write/print learned-codec training progress every N epochs.")
     compress.add_argument("--checkpoint-every", type=int, default=0, help="Save rae_temporal model checkpoints every N epochs; 0 disables periodic checkpoints.")
+    compress.add_argument("--checkpoint-keep-last", type=int, default=0, help="Keep only the newest N numbered learned-codec checkpoints; 0 disables pruning by recency.")
+    compress.add_argument("--checkpoint-keep-every", type=int, default=0, help="Also keep numbered learned-codec checkpoints whose epoch is divisible by N; 0 disables milestone retention.")
     compress.add_argument(
         "--heartbeat-every-batches",
         type=int,

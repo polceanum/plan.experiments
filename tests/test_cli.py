@@ -176,6 +176,8 @@ def test_compress_help_lists_lstm_hyperparameters(capsys):
     assert "--weight-decay" in out
     assert "--log-every" in out
     assert "--checkpoint-every" in out
+    assert "--checkpoint-keep-last" in out
+    assert "--checkpoint-keep-every" in out
     assert "--heartbeat-every-batches" in out
     assert "--train-batch-size" in out
     assert "--resume-checkpoint" in out

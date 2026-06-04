@@ -104,6 +104,12 @@ Persistent runs should either use `conda run --no-capture-output` and
 `training-status` mirror alongside the training job. The mirror does not touch
 model state; it only rewrites the status/readable files from JSONL telemetry.
 
+Large transformer point-codec runs should use checkpoint retention. Use
+`--checkpoint-keep-last N` to keep the newest numbered checkpoints for
+autoresume, and `--checkpoint-keep-every M` to preserve milestone checkpoints
+for later analysis. The `latest.pt` alias is always rewritten independently of
+numbered-checkpoint pruning.
+
 During training, the local LLM may also be used as a frozen differentiable
 critic through teacher-forced generated-token replay KL. Gradients flow through
 reconstructed KV tensors into the RAE, but the LLM weights stay frozen. This is

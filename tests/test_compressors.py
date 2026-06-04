@@ -1033,6 +1033,41 @@ def test_temporal_rae_writes_periodic_checkpoints(tmp_path: Path):
     assert not list(checkpoint_dir.glob("*.tmp"))
 
 
+def test_temporal_rae_prunes_numbered_checkpoints_with_retention_policy(tmp_path: Path):
+    _write_variable_length_run(tmp_path)
+
+    run_compression(
+        tmp_path,
+        method="rae_temporal",
+        latent_dim=3,
+        seed=0,
+        epochs=6,
+        hidden_dim=5,
+        checkpoint_every=1,
+        checkpoint_keep_last=2,
+        checkpoint_keep_every=3,
+        log_every=0,
+    )
+
+    checkpoint_dir = tmp_path / "compressions" / "rae_temporal_checkpoints"
+    numbered = sorted(path.name for path in checkpoint_dir.glob("rae_temporal_epoch_*.pt"))
+    assert numbered == [
+        "rae_temporal_epoch_000003.pt",
+        "rae_temporal_epoch_000005.pt",
+        "rae_temporal_epoch_000006.pt",
+    ]
+
+    latest = torch.load(checkpoint_dir / "rae_temporal_latest.pt", map_location="cpu")
+    assert latest["epoch"] == 6
+    assert latest["checkpoint_keep_last"] == 2
+    assert latest["checkpoint_keep_every"] == 3
+
+    training_rows = read_jsonl(tmp_path / "compressions" / "rae_temporal_training.jsonl")
+    retention_events = [row for row in training_rows if row.get("event") == "checkpoint_retention_pruned"]
+    assert retention_events
+    assert retention_events[-1]["deleted_count"] >= 1
+
+
 def test_temporal_rae_can_resume_from_checkpoint(tmp_path: Path):
     _write_variable_length_run(tmp_path)
 

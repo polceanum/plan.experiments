@@ -395,6 +395,50 @@ def _atomic_torch_save(payload: Any, path: Path) -> None:
     tmp_path.replace(path)
 
 
+def _checkpoint_epoch_from_name(path: Path, checkpoint_stem: str) -> int | None:
+    prefix = f"{checkpoint_stem}_epoch_"
+    suffix = ".pt"
+    if not path.name.startswith(prefix) or not path.name.endswith(suffix):
+        return None
+    raw_epoch = path.name[len(prefix) : -len(suffix)]
+    if not raw_epoch.isdigit():
+        return None
+    return int(raw_epoch)
+
+
+def _prune_numbered_checkpoints(
+    checkpoint_dir: Path,
+    checkpoint_stem: str,
+    *,
+    keep_last: int = 0,
+    keep_every: int = 0,
+) -> list[str]:
+    keep_last = max(0, int(keep_last))
+    keep_every = max(0, int(keep_every))
+    if keep_last == 0 and keep_every == 0:
+        return []
+    candidates: list[tuple[int, Path]] = []
+    for path in checkpoint_dir.glob(f"{checkpoint_stem}_epoch_*.pt"):
+        epoch = _checkpoint_epoch_from_name(path, checkpoint_stem)
+        if epoch is not None:
+            candidates.append((epoch, path))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0])
+    keep_epochs = {candidates[-1][0]}
+    if keep_last > 0:
+        keep_epochs.update(epoch for epoch, _ in candidates[-keep_last:])
+    if keep_every > 0:
+        keep_epochs.update(epoch for epoch, _ in candidates if epoch % keep_every == 0)
+    deleted: list[str] = []
+    for epoch, path in candidates:
+        if epoch in keep_epochs:
+            continue
+        path.unlink()
+        deleted.append(str(path))
+    return deleted
+
+
 def _tensor_tree_to_cpu(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
@@ -1009,6 +1053,8 @@ def train_temporal_lstm_autoencoder(
     progress_path: Path | None = None,
     log_every: int = 1,
     checkpoint_every: int = 0,
+    checkpoint_keep_last: int = 0,
+    checkpoint_keep_every: int = 0,
     checkpoint_dir: Path | None = None,
     heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
@@ -1041,6 +1087,8 @@ def train_temporal_lstm_autoencoder(
     latent_separation_margin = float(latent_separation_margin)
     prompt_loss_weight = float(prompt_loss_weight)
     optimizer_eps = float(optimizer_eps)
+    checkpoint_keep_last = max(0, int(checkpoint_keep_last))
+    checkpoint_keep_every = max(0, int(checkpoint_keep_every))
     if llm_loss_weight != 0.0:
         raise ValueError(
             "llm_loss_weight is deprecated because prompt-prefix KL can bias the codec away from "
@@ -1363,6 +1411,8 @@ def train_temporal_lstm_autoencoder(
         "replay_loss_steps": replay_loss_steps,
         "log_every": log_every,
         "checkpoint_every": checkpoint_every,
+        "checkpoint_keep_last": checkpoint_keep_last,
+        "checkpoint_keep_every": checkpoint_keep_every,
         "heartbeat_every_batches": heartbeat_every_batches,
         "resume_checkpoint_path": str(resume_checkpoint_path) if resume_checkpoint_path is not None else None,
         "resume_epoch": resume_epoch,
@@ -1820,6 +1870,8 @@ def train_temporal_lstm_autoencoder(
                 "prompt_loss_num_layers": int(prompt_loss_num_layers),
                 "prompt_loss_num_heads": int(prompt_loss_num_heads),
                 "prompt_loss_compact_vocab": len(prompt_token_vocab),
+                "checkpoint_keep_last": checkpoint_keep_last,
+                "checkpoint_keep_every": checkpoint_keep_every,
                 "grad_clip_norm": float(grad_clip_norm),
                 "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
                 "optimizer": "adamw",
@@ -1881,6 +1933,8 @@ def train_temporal_lstm_autoencoder(
                     "prompt_loss_compact_vocab": len(prompt_token_vocab),
                     "grad_clip_norm": float(grad_clip_norm),
                     "mps_empty_cache_every_batches": int(mps_empty_cache_every_batches),
+                    "checkpoint_keep_last": checkpoint_keep_last,
+                    "checkpoint_keep_every": checkpoint_keep_every,
                     "optimizer": "adamw",
                     "optimizer_eps": optimizer_eps,
                     "optimizer_foreach": bool(optimizer_foreach),
@@ -1912,6 +1966,27 @@ def train_temporal_lstm_autoencoder(
                 checkpoint_path = checkpoint_dir / f"{checkpoint_stem}_epoch_{epoch:06d}.pt"
                 _atomic_torch_save(checkpoint, checkpoint_path)
                 _atomic_torch_save(checkpoint, checkpoint_dir / f"{checkpoint_stem}_latest.pt")
+                deleted_checkpoints = _prune_numbered_checkpoints(
+                    checkpoint_dir,
+                    checkpoint_stem,
+                    keep_last=checkpoint_keep_last,
+                    keep_every=checkpoint_keep_every,
+                )
+                if deleted_checkpoints:
+                    _append_training_event(
+                        progress_path,
+                        {
+                            "event": "checkpoint_retention_pruned",
+                            "elapsed_s": time.perf_counter() - start,
+                            "epoch": epoch,
+                            "checkpoint_keep_last": checkpoint_keep_last,
+                            "checkpoint_keep_every": checkpoint_keep_every,
+                            "deleted_checkpoints": deleted_checkpoints,
+                            "deleted_count": len(deleted_checkpoints),
+                            "method": "rae_temporal",
+                            "memory_gb": _current_memory_gb(),
+                        },
+                    )
         except Exception as exc:
             _append_training_event(
                 progress_path,
@@ -2058,6 +2133,8 @@ def run_compression(
     latent_separation_margin: float = 0.25,
     log_every: int = 1,
     checkpoint_every: int = 0,
+    checkpoint_keep_last: int = 0,
+    checkpoint_keep_every: int = 0,
     heartbeat_every_batches: int = 100,
     train_batch_size: int = 0,
     resume_checkpoint_path: Path | None = None,
@@ -2157,6 +2234,8 @@ def run_compression(
             progress_path=progress_path,
             log_every=log_every,
             checkpoint_every=checkpoint_every,
+            checkpoint_keep_last=checkpoint_keep_last,
+            checkpoint_keep_every=checkpoint_keep_every,
             checkpoint_dir=artifact_dir / f"{method}_checkpoints",
             heartbeat_every_batches=heartbeat_every_batches,
             train_batch_size=train_batch_size,
